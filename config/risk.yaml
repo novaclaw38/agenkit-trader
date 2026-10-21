@@ -1,0 +1,11 @@
+# Hard risk limits (spec section 6). The risk gate rejects any order breaching these.
+start_equity: 1000.0          # paper account, USDT
+max_risk_per_trade: 0.01      # 1% of equity at stop
+max_daily_loss: 0.03          # 3% -> kill switch for the day
+max_drawdown: 0.10            # 10% from peak -> kill switch, manual restart
+kelly_cap: 0.25               # fractional Kelly ceiling; full Kelly never used
+max_leverage: 3.0
+max_symbol_notional_frac: 1.0 # per-symbol notional as fraction of equity
+stale_after_s: 120            # reject if market data older than this
+max_api_errors: 5             # errors within window trip the kill switch
+error_window_s: 300
