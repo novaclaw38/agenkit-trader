@@ -84,7 +84,11 @@ def test_negative_lag_and_bad_series_rejected() -> None:
 def test_subsampled_bars_need_explicit_bar_length() -> None:
     bars = hourly(72).iloc[::24]  # 05:00 each day, spacing 24h
     s = pd.Series([1.0], index=pd.DatetimeIndex(["2024-01-01 20:00"], tz="UTC"))
-    # uniform 24h spacing would infer 24h bars; that is only OK if explicit
+    # Documented behaviour: a uniform subsample is inferred to be 24h bars, so
+    # the 20:00 value is visible to the 05:00 bar (its assumed close is next
+    # day 04:59). That is wrong for true hourly bars: pass bar_length.
+    inferred = align_asof(bars, s, pd.Timedelta(0))
+    assert inferred.iloc[0] == 1.0
     out = align_asof(bars, s, pd.Timedelta(0), bar_length=pd.Timedelta(hours=1))
     assert out.isna().iloc[0]  # 20:00 value invisible to the 05:00 1h bar
     assert out.iloc[1] == 1.0

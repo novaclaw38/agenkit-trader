@@ -41,9 +41,11 @@ def align_asof(
     With zero lag, a value stamped 08:00 is invisible to the 07:00 bar of a 1h
     series (closes 07:59:59.999) and visible to the 08:00 bar.
 
-    ``bar_length`` defaults to the (required uniform) spacing of ``bars``; a
-    subsampled or gappy frame raises ``ValueError`` unless the true bar length
-    is passed explicitly, so future values can never leak via a wrong length.
+    ``bar_length`` defaults to the spacing of ``bars``, which must be uniform:
+    gappy or irregular frames raise ``ValueError``. A UNIFORMLY spaced
+    subsample (e.g. ``hourly.iloc[::24]``) is indistinguishable from real 24h
+    bars, so its spacing is inferred as the bar length; callers working with
+    subsampled bars must pass ``bar_length`` explicitly.
     """
     if available_lag < pd.Timedelta(0):
         raise ValueError("available_lag must be >= 0")

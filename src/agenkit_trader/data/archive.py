@@ -305,12 +305,14 @@ def load_funding(symbol: str, start: date, end: date, cache_dir: Path) -> pd.Ser
     s, h = s[keep], h[keep]
     what = f"{symbol} funding"
     idx = _check_index(s.index, what)
+    if h.isna().any():
+        raise DataGapError(f"{what}: missing/NaN funding_interval_hours")
     ivl = pd.to_timedelta(h.to_numpy(), unit="h")
     if (ivl <= pd.Timedelta(0)).any():
         raise DataGapError(f"{what}: non-positive funding_interval_hours")
     # Gap between consecutive events may not exceed the stated interval; across
-    # an interval change the larger of the two neighbours' intervals is allowed.
-    allowed = np.maximum(ivl[:-1], ivl[1:])
+    # an interval change the PRECEDING row's stated interval governs the gap.
+    allowed = ivl[:-1]
     big = np.asarray((idx[1:] - idx[:-1]) > allowed + FUNDING_JITTER)
     if big.any():
         i = int(big.argmax())

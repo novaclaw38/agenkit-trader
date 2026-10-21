@@ -218,6 +218,41 @@ def test_funding_interval_change_passes(fake: FakeArchive, tmp_path: Path) -> No
     assert len(s) == 9
 
 
+def test_funding_preceding_row_interval_governs(
+    fake: FakeArchive, tmp_path: Path
+) -> None:
+    a = (date(2024, 1, 1), date(2024, 1, 2))
+    # 00:00 (4h) then 08:00: the 04:00 event is missing -> refuse
+    rows = [(JAN1, 4), (JAN1 + 8 * H, 8), (JAN1 + 16 * H, 8)]
+    put_funding(fake, rows)
+    with pytest.raises(DataGapError, match="missing funding"):
+        load_funding("BTCUSDT", *a, tmp_path)
+
+
+def test_funding_8h_then_4h_boundary_passes(fake: FakeArchive, tmp_path: Path) -> None:
+    rows = [
+        (JAN1, 8),
+        (JAN1 + 8 * H, 4),
+        (JAN1 + 12 * H, 4),
+        (JAN1 + 16 * H, 4),
+        (JAN1 + 20 * H, 4),
+    ]
+    put_funding(fake, rows)
+    s = load_funding("BTCUSDT", date(2024, 1, 1), date(2024, 1, 2), tmp_path)
+    assert len(s) == 5
+
+
+def test_funding_nan_interval_raises(fake: FakeArchive, tmp_path: Path) -> None:
+    name = "BTCUSDT-fundingRate-2024-01.zip"
+    csv = (
+        "calc_time,funding_interval_hours,last_funding_rate\n"
+        f"{JAN1},8,0.0001\n{JAN1 + 8 * H},,0.0001\n{JAN1 + 16 * H},8,0.0001\n"
+    )
+    fake.add(f"monthly/fundingRate/BTCUSDT/{name}", make_zip(name, csv))
+    with pytest.raises(DataGapError, match="interval"):
+        load_funding("BTCUSDT", date(2024, 1, 1), date(2024, 1, 2), tmp_path)
+
+
 def test_funding_dropped_middle_event_raises(fake: FakeArchive, tmp_path: Path) -> None:
     rows = [(JAN1 + i * 8 * H, 8) for i in range(93) if i != 10]
     put_funding(fake, rows)
