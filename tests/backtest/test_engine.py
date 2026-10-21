@@ -45,12 +45,6 @@ def test_costs_reduce_return_by_round_trip_cost():
     expected = 1000.0 * (1 + 0.01 - per_side) * (1 - per_side)
     assert r.equity.iloc[-1] == pytest.approx(expected, rel=1e-12)
     assert r.equity.iloc[-1] < 1010.0
-    # on a flat price the loss is exactly the round trip cost on notional
-    flat = make_bars([100.0] * 5)
-    r2 = run_backtest(flat, pos(flat, [0, 1, 0, 0, 0]), costs, None, 1000.0)
-    assert 1000.0 - r2.equity.iloc[-1] == pytest.approx(
-        costs.round_trip_cost(1000.0), rel=5e-3
-    )
 
 
 def test_no_same_bar_fill_buying_the_days_max_cannot_profit():
@@ -146,12 +140,47 @@ def test_trade_return_includes_entry_and_exit_costs():
     assert r.trades["ret"].iloc[0] == pytest.approx((1 - 0.001) ** 2 - 1)
 
 
-def test_open_trade_at_end_is_reported_without_exit_cost():
-    bars = make_bars([100.0] * 4)
+def test_open_trade_at_end_is_liquidated_with_exit_cost():
     c = CostModel(0.001, 0.0, 0.0, 0.0)
-    r = run_backtest(bars, pos(bars, [0, 1, 1, 1]), c, None, 1000.0)
+    held = make_bars([100.0] * 4)
+    r = run_backtest(held, pos(held, [0, 1, 1, 1]), c, None, 1000.0)
     assert len(r.trades) == 1
-    assert r.trades["ret"].iloc[0] == pytest.approx(-0.001)
+    assert r.trades["ret"].iloc[0] == pytest.approx((1 - 0.001) ** 2 - 1, abs=1e-12)
+    # same position explicitly closed on a flat final bar: cost for cost
+    closed = make_bars([100.0] * 5)
+    r2 = run_backtest(closed, pos(closed, [0, 1, 1, 0, 0]), c, None, 1000.0)
+    assert r.equity.iloc[-1] == pytest.approx(r2.equity.iloc[-1], rel=1e-12)
+    assert r.stats.total_return == pytest.approx(r2.stats.total_return, rel=1e-12)
+    assert r.trades["ret"].iloc[0] == pytest.approx(r2.trades["ret"].iloc[0])
+
+
+def test_exact_round_trip_on_flat_price():
+    costs = CostModel(0.0004, 0.0002, 1.0, 2.0)
+    e0 = 1000.0
+    flat = make_bars([100.0] * 5)
+    r = run_backtest(flat, pos(flat, [0, 1, 0, 0, 0]), costs, None, e0)
+    c = costs.per_side_rate
+    assert r.equity.iloc[-1] == pytest.approx(e0 * (1 - c) ** 2, abs=1e-9)
+    assert r.equity.iloc[-1] == pytest.approx(
+        e0 - costs.round_trip_cost(e0) + e0 * c**2, abs=1e-9
+    )
+
+
+def test_ruin_does_not_raise_and_zeroes_equity():
+    bars = make_bars([100.0, 100.0, 200.0, 100.0, 100.0])
+    r = run_backtest(bars, pos(bars, [0, -1, 0, 0, 0]), ZERO, None, 1000.0)
+    assert r.ruined is True
+    assert r.equity.iloc[1] == 1000.0
+    assert (r.equity.iloc[2:] == 0.0).all()
+    assert r.stats.total_return == -1.0 and r.stats.max_drawdown == 1.0
+    assert np.isfinite(r.stats.sharpe)
+    assert r.trades["ret"].iloc[0] == pytest.approx(-1.0)
+
+
+def test_normal_run_not_ruined():
+    bars = make_bars([100.0, 101.0, 99.0, 100.0])
+    r = run_backtest(bars, pos(bars, [1, 1, 0, 0]), ZERO, None, 1000.0)
+    assert r.ruined is False
 
 
 def test_flip_charges_both_legs():
@@ -159,7 +188,9 @@ def test_flip_charges_both_legs():
     c = CostModel(0.001, 0.0, 0.0, 0.0)
     r = run_backtest(bars, pos(bars, [1, -1, -1, -1]), c, None, 1000.0)
     # bar0 eff 0; bar1 eff +1 (entry cost 0.001); bar2 eff -1 (turnover 2 -> 0.002)
-    assert r.equity.iloc[-1] == pytest.approx(1000 * (1 - 0.001) * (1 - 0.002))
+    assert r.equity.iloc[-1] == pytest.approx(
+        1000 * (1 - 0.001) * (1 - 0.002) * (1 - 0.001)  # + final liquidation
+    )
 
 
 def test_nan_positions_raise():

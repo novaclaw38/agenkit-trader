@@ -27,7 +27,7 @@ class Stats:
     ``profit_factor``: sum of winning trade returns / absolute sum of losing
     trade returns; ``0.0`` with no trades or no profit, ``inf`` when there is
     profit and no losing trade.
-    ``total_return``: ``equity[-1] / equity[0] - 1``.
+    ``total_return``: ``equity[-1] / equity[0] - 1`` (-1.0 if ruined).
     """
 
     sharpe: float
@@ -45,8 +45,8 @@ def compute_stats(
     if len(equity) == 0:
         raise ValueError("equity is empty")
     eq = equity.to_numpy(dtype="float64")
-    if not np.isfinite(eq).all() or (eq <= 0).any():
-        raise ValueError("equity must be finite and strictly positive")
+    if not np.isfinite(eq).all() or (eq < 0).any() or eq[0] <= 0:
+        raise ValueError("equity must be finite, >= 0 and start > 0")
     if not math.isfinite(periods_per_year) or periods_per_year <= 0:
         raise ValueError("periods_per_year must be finite and > 0")
 
@@ -56,7 +56,9 @@ def compute_stats(
 
     sharpe = 0.0
     if n_trades > 0 and len(eq) > 2:
-        r = eq[1:] / eq[:-1] - 1.0
+        prev = eq[:-1]
+        # once ruined (equity 0) the per-bar return is defined as 0
+        r = np.divide(eq[1:], prev, out=np.ones_like(prev), where=prev > 0) - 1.0
         sd = float(r.std(ddof=1))
         if sd > 1e-12:
             sharpe = float(r.mean() / sd * math.sqrt(periods_per_year))

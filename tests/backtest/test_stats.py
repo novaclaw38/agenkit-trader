@@ -57,6 +57,16 @@ def test_invalid_equity_rejected():
     with pytest.raises(ValueError):
         compute_stats(_eq([100.0, float("nan")]), EMPTY, 100)
     with pytest.raises(ValueError):
-        compute_stats(_eq([100.0, 0.0]), EMPTY, 100)
+        compute_stats(_eq([100.0, -1.0]), EMPTY, 100)
+    with pytest.raises(ValueError):
+        compute_stats(_eq([0.0, 1.0]), EMPTY, 100)
     with pytest.raises(ValueError):
         compute_stats(_eq([]), EMPTY, 100)
+
+
+def test_zero_equity_curve_is_finite():
+    s = compute_stats(_eq([100.0, 50.0, 0.0, 0.0]), pd.DataFrame({"ret": [-1.0]}), 100)
+    assert s.total_return == -1.0
+    assert s.max_drawdown == 1.0
+    assert math.isfinite(s.sharpe)
+    assert all(not math.isnan(v) for v in vars(s).values())

@@ -41,7 +41,23 @@ position. ``ret`` is the compounded net return of the bars in the run
 (including the entry cost, which is charged in its first bar) times the exit
 cost bar if the run is followed by a flat bar. When the run is followed
 directly by another position (flip or resize), the exit leg's cost lands on the
-next trade's entry bar. A trade still open at the end has no exit cost.
+next trade's entry bar.
+
+End of data. A position still open after the last bar is liquidated
+synthetically: ``|p_last| * per_side_rate`` is charged on the final equity
+(multiplicatively on the last bar's growth), included in the last trade's
+``ret``, and reflected in ``equity[-1]``, ``total_return`` and all stats. Held
+to the end is therefore identical, cost for cost, to closing on a flat final bar.
+
+Exact round trip. With a flat price, entering fraction 1.0 and exiting costs
+``c`` on each of two successive bars, so ``equity = E0 * (1 - c)**2
+= E0 - round_trip_cost(E0) + E0 * c**2`` (the ``c**2`` term is the second
+fill being charged on equity already reduced by the first).
+
+Ruin. If a bar's growth ``1 + p*r - funding - |dp|*c`` is <= 0, equity is set
+to 0 for that bar and every later bar, the position is treated as flat
+afterwards, and ``BacktestResult.ruined`` is True. Nothing is raised, so
+parameter sweeps survive their worst variant.
 """
 
 from __future__ import annotations
@@ -63,11 +79,13 @@ _TRADE_COLUMNS = ["entry_time", "exit_time", "position", "n_bars", "ret"]
 class BacktestResult:
     """``equity`` is indexed like ``bars`` (``equity[0] == equity0``);
     ``trades`` has ``entry_time``, ``exit_time`` (end of last held bar),
-    ``position``, ``n_bars`` and ``ret``."""
+    ``position``, ``n_bars`` and ``ret``. ``ruined`` is True if equity hit
+    zero (it then stays at 0 and no further trades occur); it never raises."""
 
     equity: pd.Series
     trades: pd.DataFrame
     stats: Stats
+    ruined: bool = False
 
 
 def _bar_step(bars: pd.DataFrame) -> pd.Timedelta:
@@ -106,7 +124,7 @@ def _funding_per_bar(
 def _trades(
     index: pd.DatetimeIndex,
     eff: np.ndarray,
-    net: np.ndarray,
+    growth_bar: np.ndarray,
     step: pd.Timedelta,
 ) -> pd.DataFrame:
     n = len(eff)
@@ -116,9 +134,9 @@ def _trades(
     for rid in np.unique(run_id[eff != 0]):
         loc = np.flatnonzero(run_id == rid)
         i0, i1 = int(loc[0]), int(loc[-1])
-        growth = float(np.prod(1.0 + net[i0 : i1 + 1]))
+        growth = float(np.prod(growth_bar[i0 : i1 + 1]))
         if i1 + 1 < n and eff[i1 + 1] == 0:
-            growth *= 1.0 + net[i1 + 1]
+            growth *= growth_bar[i1 + 1]
         rows.append(
             (index[i0], index[i1] + step, float(eff[i0]), i1 - i0 + 1, growth - 1.0)
         )
@@ -157,8 +175,19 @@ def run_backtest(
     fund = _funding_per_bar(funding, index, step)
 
     net = eff * ret - eff * fund - turnover * costs.per_side_rate
-    equity = equity0 * np.cumprod(1.0 + net)
+    g = 1.0 + net  # per-bar equity growth factor
+    ruined = bool((g <= 0).any())
+    if ruined:
+        k = int(np.argmax(g <= 0))
+        g[k] = 0.0
+        g[k + 1 :] = 1.0  # equity stays at 0 for all later bars
+        eff[k + 1 :] = 0.0  # no trades after ruin
+    # synthetic liquidation of a position still open after the last bar
+    g[-1] *= max(0.0, 1.0 - abs(eff[-1]) * costs.per_side_rate)
+    equity = equity0 * np.cumprod(g)
     equity_s = pd.Series(equity, index=index, name="equity")
-    trades = _trades(index, eff, net, step)
+    trades = _trades(index, eff, g, step)
     ppy = _SECONDS_PER_YEAR / step.total_seconds()
-    return BacktestResult(equity_s, trades, compute_stats(equity_s, trades, ppy))
+    return BacktestResult(
+        equity_s, trades, compute_stats(equity_s, trades, ppy), ruined=ruined
+    )
