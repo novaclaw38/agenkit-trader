@@ -79,3 +79,31 @@ def test_negative_lag_and_bad_series_rejected() -> None:
     dup = pd.concat([s, s])
     with pytest.raises(DataGapError):
         align_asof(bars, dup, pd.Timedelta(0))
+
+
+def test_subsampled_bars_need_explicit_bar_length() -> None:
+    bars = hourly(72).iloc[::24]  # 05:00 each day, spacing 24h
+    s = pd.Series([1.0], index=pd.DatetimeIndex(["2024-01-01 20:00"], tz="UTC"))
+    # uniform 24h spacing would infer 24h bars; that is only OK if explicit
+    out = align_asof(bars, s, pd.Timedelta(0), bar_length=pd.Timedelta(hours=1))
+    assert out.isna().iloc[0]  # 20:00 value invisible to the 05:00 1h bar
+    assert out.iloc[1] == 1.0
+
+
+def test_gappy_bars_without_bar_length_raise() -> None:
+    bars = hourly(10).drop(hourly(10).index[4])
+    s = pd.Series([1.0], index=pd.DatetimeIndex(["2024-01-01 05:00"], tz="UTC"))
+    with pytest.raises(ValueError, match="uniformly"):
+        align_asof(bars, s, pd.Timedelta(0))
+    out = align_asof(bars, s, pd.Timedelta(0), bar_length=pd.Timedelta(hours=1))
+    assert len(out) == 9
+
+
+def test_irregular_subsample_raises_and_explicit_blocks_future() -> None:
+    bars = hourly(72).iloc[[0, 1, 5, 30]]
+    s = pd.Series([1.0], index=pd.DatetimeIndex(["2024-01-01 09:30"], tz="UTC"))
+    with pytest.raises(ValueError):
+        align_asof(bars, s, pd.Timedelta(0))
+    out = align_asof(bars, s, pd.Timedelta(0), bar_length=pd.Timedelta(hours=1))
+    # bar at 10:00 (index 5) closes 10:59 -> sees it; bars at 05:00/06:00 do not
+    assert out.isna().tolist() == [True, True, False, False]

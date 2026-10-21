@@ -11,6 +11,7 @@ from agenkit_trader.data import archive
 from agenkit_trader.data.archive import (
     ArchiveNotFoundError,
     ChecksumError,
+    DataGapError,
     load_funding,
     load_klines,
     load_open_interest,
@@ -174,6 +175,66 @@ def test_funding(fake: FakeArchive, tmp_path: Path) -> None:
     assert str(s.index.tz) == "UTC"
     assert len(s) == 3  # end-exclusive: 00:00, 08:00, 16:00
     assert s.iloc[1] == pytest.approx(0.0001)
+
+
+def funding_zip(rows: list[tuple[int, int]]) -> bytes:
+    name = "BTCUSDT-fundingRate-2024-01.zip"
+    csv = "calc_time,funding_interval_hours,last_funding_rate\n" + "".join(
+        f"{t},{h},0.0001\n" for t, h in rows
+    )
+    return make_zip(name, csv)
+
+
+def put_funding(f: FakeArchive, rows: list[tuple[int, int]]) -> None:
+    f.add(
+        "monthly/fundingRate/BTCUSDT/BTCUSDT-fundingRate-2024-01.zip",
+        funding_zip(rows),
+    )
+
+
+def test_funding_clean_8h_passes(fake: FakeArchive, tmp_path: Path) -> None:
+    put_funding(fake, [(JAN1 + i * 8 * H, 8) for i in range(93)])
+    a = (date(2024, 1, 1), date(2024, 1, 11))
+    assert len(load_funding("BTCUSDT", *a, tmp_path)) == 30
+
+
+def test_funding_clean_4h_passes(fake: FakeArchive, tmp_path: Path) -> None:
+    put_funding(fake, [(JAN1 + i * 4 * H, 4) for i in range(186)])
+    a = (date(2024, 1, 1), date(2024, 1, 11))
+    assert len(load_funding("BTCUSDT", *a, tmp_path)) == 60
+
+
+def test_funding_ms_jitter_tolerated(fake: FakeArchive, tmp_path: Path) -> None:
+    put_funding(fake, [(JAN1 + i * 8 * H + (i % 3), 8) for i in range(93)])
+    s = load_funding("BTCUSDT", date(2024, 1, 1), date(2024, 2, 1), tmp_path)
+    assert len(s) == 93
+
+
+def test_funding_interval_change_passes(fake: FakeArchive, tmp_path: Path) -> None:
+    rows = [(JAN1 + i * 8 * H, 8) for i in range(3)]  # day 1
+    rows += [(JAN1 + 24 * H + i * 4 * H, 4) for i in range(6)]  # day 2 at 4h
+    put_funding(fake, rows)
+    s = load_funding("BTCUSDT", date(2024, 1, 1), date(2024, 1, 3), tmp_path)
+    assert len(s) == 9
+
+
+def test_funding_dropped_middle_event_raises(fake: FakeArchive, tmp_path: Path) -> None:
+    rows = [(JAN1 + i * 8 * H, 8) for i in range(93) if i != 10]
+    put_funding(fake, rows)
+    with pytest.raises(DataGapError, match="missing funding"):
+        load_funding("BTCUSDT", date(2024, 1, 1), date(2024, 1, 31), tmp_path)
+
+
+def test_funding_late_start_raises(fake: FakeArchive, tmp_path: Path) -> None:
+    put_funding(fake, [(JAN1 + i * 8 * H, 8) for i in range(3, 93)])
+    with pytest.raises(DataGapError, match="first event"):
+        load_funding("BTCUSDT", date(2024, 1, 1), date(2024, 1, 31), tmp_path)
+
+
+def test_funding_early_end_raises(fake: FakeArchive, tmp_path: Path) -> None:
+    put_funding(fake, [(JAN1 + i * 8 * H, 8) for i in range(80)])
+    with pytest.raises(DataGapError, match="last event"):
+        load_funding("BTCUSDT", date(2024, 1, 1), date(2024, 2, 1), tmp_path)
 
 
 def test_funding_missing_month_raises(fake: FakeArchive, tmp_path: Path) -> None:

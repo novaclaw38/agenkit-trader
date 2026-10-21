@@ -38,6 +38,8 @@ import pandas as pd
 
 BASE_URL = "https://data.binance.vision/data/futures/um"
 OI_STEP = pd.Timedelta(minutes=5)
+# Funding calc_time carries ms jitter (e.g. 00:00:00.001); tolerate up to 1 minute.
+FUNDING_JITTER = pd.Timedelta(minutes=1)
 
 
 class DataGapError(Exception):
@@ -271,10 +273,13 @@ def load_funding(symbol: str, start: date, end: date, cache_dir: Path) -> pd.Ser
     """Funding rates with ``funding_time`` in ``[start, end)`` (UTC, end-exclusive).
 
     Monthly files only; a month that is not published raises
-    ``ArchiveNotFoundError``. Duplicates / disorder raise ``DataGapError``.
+    ``ArchiveNotFoundError``. Duplicates, disorder, a gap larger than the stated
+    ``funding_interval_hours``, or first/last events not within one interval of
+    the range edges raise ``DataGapError``.
     """
     _check_range(start, end)
     parts: list[pd.Series] = []
+    hours: list[pd.Series] = []
     for y, m in _months(start, end):
         ym = f"{y:04d}-{m:02d}"
         rel = f"monthly/fundingRate/{symbol}/{symbol}-fundingRate-{ym}.zip"
@@ -290,10 +295,39 @@ def load_funding(symbol: str, start: date, end: date, cache_dir: Path) -> pd.Ser
             name="funding_rate",
         )
         parts.append(s)
+        hours.append(
+            pd.Series(df.iloc[:, 1].astype("float64").to_numpy(), index=s.index)
+        )
     s = pd.concat(parts)
+    h = pd.concat(hours)
     s.index.name = "funding_time"
-    s = s[(s.index >= _utc(start)) & (s.index < _utc(end))]
-    _check_index(s.index, f"{symbol} funding")
+    keep = (s.index >= _utc(start)) & (s.index < _utc(end))
+    s, h = s[keep], h[keep]
+    what = f"{symbol} funding"
+    idx = _check_index(s.index, what)
+    ivl = pd.to_timedelta(h.to_numpy(), unit="h")
+    if (ivl <= pd.Timedelta(0)).any():
+        raise DataGapError(f"{what}: non-positive funding_interval_hours")
+    # Gap between consecutive events may not exceed the stated interval; across
+    # an interval change the larger of the two neighbours' intervals is allowed.
+    allowed = np.maximum(ivl[:-1], ivl[1:])
+    big = np.asarray((idx[1:] - idx[:-1]) > allowed + FUNDING_JITTER)
+    if big.any():
+        i = int(big.argmax())
+        raise DataGapError(
+            f"{what}: missing funding event(s) between {idx[i]} and {idx[i + 1]} "
+            f"(stated interval {allowed[i]})"
+        )
+    if idx[0] - _utc(start) > ivl[0] + FUNDING_JITTER:
+        raise DataGapError(
+            f"{what}: first event {idx[0]} is more than one interval ({ivl[0]}) "
+            f"after start {_utc(start)}"
+        )
+    if _utc(end) - idx[-1] > ivl[-1] + FUNDING_JITTER:
+        raise DataGapError(
+            f"{what}: last event {idx[-1]} is more than one interval ({ivl[-1]}) "
+            f"before end {_utc(end)}"
+        )
     return pd.Series(s)
 
 
