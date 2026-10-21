@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+
+def _require_finite(obj: object) -> None:
+    for f in fields(obj):  # type: ignore[arg-type]
+        v = getattr(obj, f.name)
+        if not math.isfinite(v):
+            raise ValueError(f"{f.name} must be finite, got {v!r}")
 
 
 @dataclass(frozen=True)
@@ -23,6 +31,7 @@ class RiskConfig:
     error_window_s: int = 300
 
     def __post_init__(self) -> None:
+        _require_finite(self)
         for name in (
             "start_equity",
             "max_risk_per_trade",
@@ -57,6 +66,9 @@ class GateConfig:
     neighbour_tolerance: float
 
     def __post_init__(self) -> None:
+        _require_finite(self)
+        if self.min_sharpe < 0:
+            raise ValueError("min_sharpe must be >= 0")
         if not 0 < self.holdout_frac < 1:
             raise ValueError("holdout_frac must be in (0, 1)")
         if self.min_trades <= 0:

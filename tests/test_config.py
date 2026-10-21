@@ -1,3 +1,4 @@
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -77,3 +78,37 @@ def test_gate_rejects_bad_values() -> None:
             max_trial_adjusted_pvalue=0.05,
             neighbour_tolerance=0.5,
         )
+
+
+_RISK_FIELDS = [f.name for f in dataclasses.fields(RiskConfig)]
+_GATE_FIELDS = [f.name for f in dataclasses.fields(GateConfig)]
+_GATE_OK: dict[str, float] = {
+    "holdout_frac": 0.3,
+    "min_trades": 30,
+    "min_sharpe": 0.5,
+    "max_drawdown": 0.25,
+    "min_profit_factor": 1.2,
+    "cost_multiplier": 2.0,
+    "max_trial_adjusted_pvalue": 0.05,
+    "neighbour_tolerance": 0.5,
+}
+_BAD = [float("nan"), float("inf"), float("-inf")]
+
+
+@pytest.mark.parametrize("bad", _BAD)
+@pytest.mark.parametrize("field", _RISK_FIELDS)
+def test_risk_rejects_non_finite(field: str, bad: float) -> None:
+    with pytest.raises(ValueError, match=field):
+        RiskConfig(**{field: bad})  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("bad", _BAD)
+@pytest.mark.parametrize("field", _GATE_FIELDS)
+def test_gate_rejects_non_finite(field: str, bad: float) -> None:
+    with pytest.raises(ValueError, match=field):
+        GateConfig(**{**_GATE_OK, field: bad})  # type: ignore[arg-type]
+
+
+def test_gate_rejects_negative_min_sharpe() -> None:
+    with pytest.raises(ValueError, match="min_sharpe"):
+        GateConfig(**{**_GATE_OK, "min_sharpe": -0.1})  # type: ignore[arg-type]
