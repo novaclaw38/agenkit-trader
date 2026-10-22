@@ -82,3 +82,27 @@ def test_size_never_exceeds_risk_budget(
     assert q >= 0.0
     eps = 1e-9 * max(1.0, equity * CFG.max_risk_per_trade)
     assert q * abs(entry - stop) <= equity * CFG.max_risk_per_trade + eps
+
+
+def test_lot_tolerance_is_symmetric() -> None:
+    from agenkit_trader.risk.sizing import floor_to_lot, is_lot_multiple
+
+    lot = 0.001
+    for rel in (5e-13, -5e-13):
+        q = lot * (1 + rel)
+        assert is_lot_multiple(q, lot)
+        assert floor_to_lot(q, lot) == lot
+    for rel in (5e-10, -5e-10, 1e-6, -1e-6):
+        q = lot * (1 + rel)
+        assert not is_lot_multiple(q, lot)
+        f = floor_to_lot(q, lot)
+        assert f <= q
+        assert f == (lot if rel > 0 else 0.0)
+    assert is_lot_multiple(0.011, lot)
+    assert floor_to_lot(0.011, lot) == 11 * lot
+    for q in (0.011, 0.0119, 7 * lot, 123.456):
+        f = floor_to_lot(q, lot)
+        assert f <= q * (1 + 1e-12)
+        if f > 0:
+            assert is_lot_multiple(f, lot)
+            assert floor_to_lot(f, lot) == f

@@ -17,21 +17,34 @@ def _pos_finite(x: object) -> bool:
     )
 
 
-def floor_to_lot(qty: float, lot: float) -> float:
-    """Round ``qty`` down to a whole number of lots, never up."""
-    # Snap values within float noise of a lot boundary (0.011 / 0.001 is
-    # 10.999...), but never return more than qty beyond relative 1e-12.
-    n = math.floor(qty / lot + 1e-9)
-    q = n * lot
-    while n > 0 and q > qty * (1 + 1e-12):
-        n -= 1
-        q = n * lot
-    return q if n > 0 else 0.0
+# Single lot tolerance, relative to the quantity. A qty within LOT_REL_TOL
+# of a whole number of lots (above or below) is that multiple; anything else
+# is not. floor_to_lot therefore never returns more than qty * (1 + 1e-12).
+LOT_REL_TOL = 1e-12
+
+
+def _snap(qty: float, lot: float) -> int | None:
+    n = round(qty / lot)
+    if n >= 1 and abs(n * lot - qty) <= LOT_REL_TOL * qty:
+        return n
+    return None
 
 
 def is_lot_multiple(qty: float, lot: float) -> bool:
-    """True if ``qty`` is a whole number of lots up to float noise."""
-    return abs(qty - floor_to_lot(qty, lot)) <= lot * 1e-9
+    """True iff ``qty`` is within LOT_REL_TOL of a whole number (>=1) of lots."""
+    return _snap(qty, lot) is not None
+
+
+def floor_to_lot(qty: float, lot: float) -> float:
+    """Round ``qty`` down to whole lots; exact multiples (per LOT_REL_TOL) map
+    to themselves. Never exceeds ``qty * (1 + LOT_REL_TOL)``."""
+    snapped = _snap(qty, lot)
+    if snapped is not None:
+        return snapped * lot
+    n = math.floor(qty / lot)
+    while n > 0 and n * lot > qty:
+        n -= 1
+    return n * lot if n > 0 else 0.0
 
 
 def size_position(
