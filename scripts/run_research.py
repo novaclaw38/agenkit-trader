@@ -38,15 +38,34 @@ def load_costs(path: Path) -> CostModel:
     )
 
 
-def main(argv: list[str] | None = None) -> None:
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--symbols", nargs="+", default=["BTCUSDT", "ETHUSDT"])
-    ap.add_argument("--interval", default="1h")
-    ap.add_argument("--start", default="2021-01-01")
-    ap.add_argument("--end", default="2026-10-01")
-    ap.add_argument("--cache", type=Path, default=ROOT / "data" / "cache")
-    ap.add_argument("--out", type=Path, default=ROOT / "research" / "REPORT.md")
-    a = ap.parse_args(argv)
+    ap.add_argument(
+        "--symbols",
+        nargs="+",
+        default=["BTCUSDT", "ETHUSDT"],
+        help="USD-M perpetual symbols (default: %(default)s)",
+    )
+    ap.add_argument("--interval", default="1h", help="kline interval (default: 1h)")
+    ap.add_argument("--start", default="2021-01-01", help="first day, ISO date")
+    ap.add_argument("--end", default="2026-10-01", help="last day, ISO date")
+    ap.add_argument(
+        "--cache",
+        type=Path,
+        default=ROOT / "data" / "cache",
+        help="download cache directory (default: data/cache)",
+    )
+    ap.add_argument(
+        "--out",
+        type=Path,
+        default=ROOT / "research" / "REPORT.md",
+        help="report path; trials.json and deployed.json are written beside it",
+    )
+    return ap
+
+
+def main(argv: list[str] | None = None) -> None:
+    a = build_parser().parse_args(argv)
     start, end = date.fromisoformat(a.start), date.fromisoformat(a.end)
 
     gate_cfg = load_gate_config(ROOT / "config" / "gate.yaml")

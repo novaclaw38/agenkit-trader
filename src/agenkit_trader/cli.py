@@ -1,6 +1,6 @@
 """``agenkit`` command line.
 
-* ``agenkit paper --config config/risk.yaml [--runtime config/runtime.yaml]
+* ``agenkit paper [--config config/risk.yaml] [--runtime config/runtime.yaml]
   [--deployed research/deployed.json] [--once]``: paper trading on the
   Binance Futures TESTNET. Refuses to start (non-zero exit, no network call)
   unless ``deployed.json`` lists at least one strategy signed off by the
@@ -294,36 +294,87 @@ def _research(args: list[str]) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0] == "research":
-        return _research(argv[1:])
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="agenkit", description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("research", help="run scripts/run_research.py")
+    sub.add_parser(
+        "research",
+        help="run scripts/run_research.py (counts trials; see research/NOTES.md)",
+        description="All arguments are passed to scripts/run_research.py; "
+        "`agenkit research -h` shows them.",
+    )
+    state_help = "paper state file (relative paths are anchored to the repo root)"
+    log_help = "decision log, JSON lines (relative paths anchored to the repo root)"
     p = sub.add_parser("paper", help="paper trade deployed strategies on testnet")
-    p.add_argument("--config", type=Path, required=True, help="risk config")
-    p.add_argument("--runtime", type=Path, default=Path("config/runtime.yaml"))
-    p.add_argument("--deployed", type=Path, default=Path("research/deployed.json"))
-    p.add_argument("--gate", type=Path, default=Path("config/gate.yaml"))
-    p.add_argument("--log", type=Path, default=Path("logs/paper.jsonl"))
-    p.add_argument("--state", type=Path, default=Path("state/paper_state.json"))
-    p.add_argument("--once", action="store_true", help="run a single cycle")
+    p.add_argument(
+        "--config",
+        type=Path,
+        default=Path("config/risk.yaml"),
+        help="RISK config (default: config/risk.yaml); not runtime.yaml",
+    )
+    p.add_argument(
+        "--runtime",
+        type=Path,
+        default=Path("config/runtime.yaml"),
+        help="runtime config: interval, stops, polling (default: %(default)s)",
+    )
+    p.add_argument(
+        "--deployed",
+        type=Path,
+        default=Path("research/deployed.json"),
+        help="strategies signed off by the validation gate (default: %(default)s)",
+    )
+    p.add_argument(
+        "--gate",
+        type=Path,
+        default=Path("config/gate.yaml"),
+        help="gate config, hashed into the startup record (default: %(default)s)",
+    )
+    p.add_argument("--log", type=Path, default=Path("logs/paper.jsonl"), help=log_help)
+    p.add_argument(
+        "--state", type=Path, default=Path("state/paper_state.json"), help=state_help
+    )
+    p.add_argument("--once", action="store_true", help="run a single cycle and exit")
     p.add_argument(
         "--init-state",
         action="store_true",
         help="create a NEW state file if none exists (new paper account)",
     )
     r = sub.add_parser("reset-halt", help="clear a persisted kill-switch halt")
-    r.add_argument("--state", type=Path, default=Path("state/paper_state.json"))
-    r.add_argument("--log", type=Path, default=Path("logs/paper.jsonl"))
+    r.add_argument(
+        "--state", type=Path, default=Path("state/paper_state.json"), help=state_help
+    )
+    r.add_argument("--log", type=Path, default=Path("logs/paper.jsonl"), help=log_help)
     lv = sub.add_parser(
         "live", help="check the live unlock conditions (interactive; no trading)"
     )
-    lv.add_argument("--live-config", type=Path, default=Path("config/live.yaml"))
-    lv.add_argument("--config", type=Path, default=Path("config/risk.yaml"))
-    lv.add_argument("--log", type=Path, default=Path("logs/paper.jsonl"))
-    a = ap.parse_args(argv)
+    lv.add_argument(
+        "--live-config",
+        type=Path,
+        default=Path("config/live.yaml"),
+        help="live unlock thresholds (default: %(default)s)",
+    )
+    lv.add_argument(
+        "--config",
+        type=Path,
+        default=Path("config/risk.yaml"),
+        help="RISK config checked by the unlock gate (default: %(default)s)",
+    )
+    lv.add_argument(
+        "--log",
+        type=Path,
+        default=Path("logs/paper.jsonl"),
+        help="paper decision log the paper record is derived from "
+        "(default: %(default)s)",
+    )
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "research":
+        return _research(argv[1:])
+    a = build_parser().parse_args(argv)
     if a.cmd == "paper":
         return _paper(a)
     if a.cmd == "live":

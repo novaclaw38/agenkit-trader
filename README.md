@@ -30,6 +30,78 @@ Status of each part:
   build. See `docs/GOING_LIVE.md`.
 - **Known failure modes:** see section 12 of the design spec.
 
+## Commands
+
+Every command below was checked with its `-h` or its refusal path.
+
+### First paper run (testnet only)
+
+`agenkit paper` currently refuses to start: `research/deployed.json` is empty
+because no strategy passed the validation gate. The steps below are for when
+one does.
+
+Keys: create them on https://testnet.binancefuture.com only (never mainnet
+keys). They are read only from the environment:
+
+    export BINANCE_TESTNET_KEY=...      # testnet.binancefuture.com key
+    export BINANCE_TESTNET_SECRET=...   # testnet.binancefuture.com secret
+
+First run (creates a new paper state file; `--config` defaults to
+`config/risk.yaml`, the RISK config, not `config/runtime.yaml`):
+
+    agenkit paper --config config/risk.yaml --init-state
+
+A single cycle you can watch, then exit:
+
+    agenkit paper --config config/risk.yaml --once
+
+After a kill-switch halt (exit code 3), read `logs/paper.jsonl`, then clear the
+halt (asks you to type `RESUME`):
+
+    agenkit reset-halt
+
+Checklist:
+
+- [ ] After the first entry, open the testnet UI and confirm the reduce-only
+      STOP order for that position actually appears on the exchange. The
+      algo-order behaviour of the testnet has NOT been verified by this
+      project; if no stop is there, stop the runtime and treat the position as
+      unprotected.
+- [ ] Read the "What research validated vs what paper runs" note below.
+
+### Research
+
+    agenkit research -h     # flags of scripts/run_research.py
+
+A real `agenkit research` run downloads data, adds every grid point to
+`research/trials.json` (never reset) and rewrites `research/REPORT.md` and
+`research/deployed.json`. Each run is a counted trial; see `research/NOTES.md`.
+
+### Live
+
+    agenkit live -h
+
+Live trading is locked and NOT implemented. `agenkit live` (interactive
+terminal only) checks the unlock conditions in `config/live.yaml` and places
+nothing, whatever the outcome. See `docs/GOING_LIVE.md`.
+
+## What research validated vs what paper runs
+
+A research pass does NOT validate the runtime's sizing or stop policy.
+
+- Research backtests each signal's fractional position as-is (for example,
+  trend_breakout's vol_cap scaling goes up to 1x equity) and never stops out.
+- The paper runtime keeps only the sign of the signal. It sizes so that the
+  loss at a 3 x ATR(14) exchange-side disaster stop is at most 1% of equity
+  (roughly 0.4x equity notional on ETH 1h; an illustrative estimate, not a
+  measurement). After a stop-out it does not re-enter until the signal makes
+  a fresh transition.
+- The backtest simulates neither the disaster stop nor that re-entry rule.
+
+So paper P&L is not the P&L of what was validated. Making the backtest
+simulate runtime sizing and stops would be a new research design and a new
+counted run; that is the user's decision.
+
 ## Development
 
     python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'

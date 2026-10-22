@@ -178,7 +178,18 @@ class LiveConfig:
             )
 
 
-def _load_mapping(path: Path) -> dict[str, Any]:
+_KIND = {
+    "RiskConfig": "risk config (e.g. config/risk.yaml)",
+    "GateConfig": "gate config (e.g. config/gate.yaml)",
+    "RuntimeConfig": "runtime config (e.g. config/runtime.yaml)",
+    "LiveConfig": "live config (e.g. config/live.yaml)",
+}
+
+
+def _load_mapping(path: Path, cls: type | None = None) -> dict[str, Any]:
+    kind = _KIND.get(cls.__name__, "config") if cls is not None else "config"
+    if Path(path).is_dir():
+        raise ConfigError(f"{path}: is a directory; expected a {kind} file")
     data = yaml.safe_load(Path(path).read_text())
     if data is None:
         return {}
@@ -192,28 +203,32 @@ def _check_keys(cls: type, data: dict[str, Any], path: Path) -> None:
     unknown = set(data) - allowed
     if unknown:
         # count only: an unknown key could be a secret pasted by mistake
-        raise ConfigError(f"{path}: {len(unknown)} unknown keys (names not shown)")
+        kind = _KIND.get(cls.__name__, "config")
+        raise ConfigError(
+            f"{path}: {len(unknown)} unknown keys (names not shown); expected a "
+            f"{kind} with keys: {', '.join(sorted(allowed))}"
+        )
 
 
 def load_risk_config(path: Path) -> RiskConfig:
-    data = _load_mapping(path)
+    data = _load_mapping(path, RiskConfig)
     _check_keys(RiskConfig, data, path)
     return RiskConfig(**data)
 
 
 def load_gate_config(path: Path) -> GateConfig:
-    data = _load_mapping(path)
+    data = _load_mapping(path, GateConfig)
     _check_keys(GateConfig, data, path)
     return GateConfig(**data)
 
 
 def load_runtime_config(path: Path) -> RuntimeConfig:
-    data = _load_mapping(path)
+    data = _load_mapping(path, RuntimeConfig)
     _check_keys(RuntimeConfig, data, path)
     return RuntimeConfig(**data)
 
 
 def load_live_config(path: Path) -> LiveConfig:
-    data = _load_mapping(path)
+    data = _load_mapping(path, LiveConfig)
     _check_keys(LiveConfig, data, path)
     return LiveConfig(**data)

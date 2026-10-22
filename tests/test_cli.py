@@ -308,3 +308,49 @@ def test_reset_halt_on_truncated_log_explains_and_does_not_repair(
     assert rc == 2
     assert str(log) in err and "line 2" in err and "move" in err
     assert log.read_bytes() == before  # never auto-repaired
+
+
+def _subparsers() -> dict[str, Any]:
+    import argparse
+
+    ap = cli.build_parser()
+    sub = next(a for a in ap._actions if isinstance(a, argparse._SubParsersAction))
+    return dict(sub.choices)
+
+
+@pytest.mark.parametrize("cmd", ["paper", "reset-halt", "live", "research"])
+def test_every_flag_has_help(cmd: str) -> None:
+    p = _subparsers()[cmd]
+    for act in p._actions:
+        assert act.help, f"{cmd}: {act.option_strings or act.dest} has no help"
+
+
+def test_research_script_flags_have_help() -> None:
+    import runpy
+
+    mod = runpy.run_path(str(ROOT / "scripts" / "run_research.py"))
+    for act in mod["build_parser"]()._actions:
+        assert act.help, act.option_strings
+
+
+def test_paper_config_defaults_to_risk_yaml() -> None:
+    a = cli.build_parser().parse_args(["paper"])
+    assert a.config == Path("config/risk.yaml")
+
+
+def test_paper_config_directory_is_friendly(
+    no_network: list[str], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rc = cli.main(["paper", "--config", str(tmp_path), "--log", str(tmp_path / "l")])
+    err = capsys.readouterr().err
+    assert rc == 2 and no_network == []
+    assert "is a directory" in err and "risk config" in err
+
+
+def test_paper_config_runtime_yaml_says_expected_kind(
+    no_network: list[str], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rc = cli.main(["paper", "--config", RUNTIME, "--log", str(tmp_path / "l")])
+    err = capsys.readouterr().err
+    assert rc == 2 and no_network == []
+    assert "unknown keys" in err and "expected a risk config" in err
