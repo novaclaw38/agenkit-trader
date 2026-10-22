@@ -151,11 +151,15 @@ class Deployment:
 
 
 _DEPLOYED_KEYS = {"name", "symbol", "interval", "params", "allowed_regimes"}
+# Optional: the validation policy that produced the entry (report.py writes
+# it; older files lack it). Accepted and validated only.
+_DEPLOYED_POLICIES = ("research", "runtime")
 
 
 def load_deployed(path: Path) -> list[Deployment]:
     """Read the validation gate's ``deployed.json`` (a JSON list of
-    ``{name, symbol, interval, params, allowed_regimes}``). Raises
+    ``{name, symbol, interval, params, allowed_regimes}``, optionally with
+    ``policy`` in ``_DEPLOYED_POLICIES``). Raises
     ``DeployedError`` if it is missing, unreadable, malformed or EMPTY."""
     path = Path(path)
     if not path.exists():
@@ -178,9 +182,14 @@ def load_deployed(path: Path) -> list[Deployment]:
         )
     out: list[Deployment] = []
     for i, e in enumerate(data):
-        if not isinstance(e, dict) or set(e) != _DEPLOYED_KEYS:
+        if not isinstance(e, dict) or set(e) - {"policy"} != _DEPLOYED_KEYS:
             raise DeployedError(
                 f"{path}[{i}]: expected exactly the keys {sorted(_DEPLOYED_KEYS)}"
+                " (plus an optional policy)"
+            )
+        if "policy" in e and e["policy"] not in _DEPLOYED_POLICIES:
+            raise DeployedError(
+                f"{path}[{i}]: policy must be one of {list(_DEPLOYED_POLICIES)}"
             )
         ok = (
             all(isinstance(e[k], str) and e[k] for k in ("name", "symbol", "interval"))
