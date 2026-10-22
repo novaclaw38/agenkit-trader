@@ -422,7 +422,13 @@ def _walk(seed: int, n: int) -> pd.DataFrame:
 
 
 def _runtime_signals(
-    tmp_path: Path, bars: pd.DataFrame, strat: Any, params: dict[str, Any], first: int
+    tmp_path: Path,
+    bars: pd.DataFrame,
+    strat: Any,
+    params: dict[str, Any],
+    first: int,
+    funding: pd.Series | None = None,
+    rt_cfg: RuntimeConfig = RT,
 ) -> dict[int, tuple[float, float]]:
     """(target, prev_target) the real Runtime logs at each closed bar."""
     venue = FakeVenue()
@@ -439,7 +445,7 @@ def _runtime_signals(
         kill,
         log,
         lambda: clock["now"],
-        runtime_cfg=RT,
+        runtime_cfg=rt_cfg,
         state_path=tmp_path / "state.json",
         init_state=True,
     )
@@ -450,6 +456,8 @@ def _runtime_signals(
         now = bars.index[k] + STEP + pd.Timedelta(seconds=30)
         clock["now"] = venue.now = now.to_pydatetime()
         venue.equity = 1000.0
+        if funding is not None:  # the exchange only holds records up to now
+            venue.funding[SYM] = funding[funding.index <= now]
         if k == first:
             rt.start()
         rt.cycle()
@@ -497,3 +505,152 @@ def test_window_guard_refuses_lookback_plus_warmup_beyond_bars_limit() -> None:
     with pytest.raises(WindowError, match="runtime window"):
         window_signals(strat, bars, {"lookback": 336, "vol_cap": 1.0}, {}, 700, 0)
     window_signals(strat, bars, {"lookback": 48, "vol_cap": 1.0}, {}, 1000, 290)
+
+
+def _funding(bars: pd.DataFrame, seed: int) -> pd.Series:
+    """8-hourly funding records from a day before the bars to their end;
+    heavy tails so funding_reversion actually trades."""
+    rng = np.random.default_rng(100 + seed)
+    idx = pd.date_range(
+        bars.index[0] - pd.Timedelta(hours=24),
+        bars.index[-1] + STEP,
+        freq="8h",
+        tz="UTC",
+    )
+    return pd.Series(rng.standard_t(3, len(idx)) * 0.0004, index=idx)
+
+
+def _aligned(bars: pd.DataFrame, funding: pd.Series) -> dict[str, pd.Series]:
+    from agenkit_trader.data.align import align_asof
+    from agenkit_trader.strategies.funding_reversion import FUNDING_AVAILABLE_LAG
+
+    return {"funding": align_asof(bars, funding, FUNDING_AVAILABLE_LAG)}
+
+
+def _assert_window_parity(
+    tmp_path: Path,
+    strat: Any,
+    params: dict[str, Any],
+    first: int,
+    n_after: int,
+    use_funding: bool,
+    rt_cfg: RuntimeConfig = RT,
+) -> int:
+    """Simulator window signals == the real runtime's, bar for bar; returns
+    the number of bars where the capped/no-window variant would differ."""
+    from agenkit_trader.backtest.runtime_policy import window_signals
+
+    differs = 0
+    for seed in (0, 1):
+        bars = _walk(seed, first + n_after)
+        f = _funding(bars, seed) if use_funding else None
+        aux = _aligned(bars, f) if f is not None else {}
+        d = tmp_path / f"s{seed}"
+        d.mkdir()
+        rt = _runtime_signals(d, bars, strat, params, first, f, rt_cfg)
+        tgt, prv = window_signals(
+            strat, bars, params, aux, rt_cfg.bars_limit, first, funding=f
+        )
+        assert sorted(rt) == list(range(first, len(bars)))
+        assert [rt[t] for t in range(first, len(bars))] == list(
+            zip(tgt.tolist(), prv.tolist(), strict=True)
+        )
+        assert np.abs(tgt).sum() > 0, "scenario never trades"
+        full = strat.signal(bars, params, aux)
+        differs += int((np.sign(full.iloc[first:].to_numpy()) != tgt).sum())
+    return differs
+
+
+def test_window_signals_equal_runtime_signals_funding_reversion(
+    tmp_path: Path,
+) -> None:
+    from agenkit_trader.strategies import REGISTRY
+
+    _assert_window_parity(
+        tmp_path,
+        REGISTRY["funding_reversion"],
+        {"entry": 0.0003, "max_hold": 24},
+        RT.bars_limit + 20,
+        300,
+        True,
+    )
+
+
+def test_window_signals_equal_runtime_signals_short_reversion(
+    tmp_path: Path,
+) -> None:
+    from agenkit_trader.strategies import REGISTRY
+
+    _assert_window_parity(
+        tmp_path,
+        REGISTRY["short_reversion"],
+        {"z_entry": 2.0, "er_max": 0.4},
+        RT.bars_limit + 20,
+        300,
+        False,
+    )
+
+
+def test_funding_window_is_capped_like_the_runtime_fetch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The runtime keeps only the last FUNDING_LIMIT funding records, so the
+    oldest bars of its window have NO funding (NaN). With a tiny limit the
+    effect is large; the simulator must reproduce it."""
+    from agenkit_trader.runtime import loop
+    from agenkit_trader.strategies import REGISTRY
+
+    monkeypatch.setattr(loop, "FUNDING_LIMIT", 5)
+    differs = _assert_window_parity(
+        tmp_path,
+        REGISTRY["funding_reversion"],
+        {"entry": 0.0003, "max_hold": 24},
+        RT.bars_limit + 20,
+        200,
+        True,
+    )
+    assert differs > 0  # the cap changes signals vs the uncapped history
+
+
+class EdgeStrategy:
+    """Warm-up of exactly bars_limit - 1: its signal is non-zero only at the
+    last row of a FULL window (index bars_limit - 1)."""
+
+    name = "edge_warmup"
+    edge = "test"
+    param_grid: dict[str, list[Any]] = {"k": [1]}
+
+    def __init__(self, bars_limit: int) -> None:
+        self.n = bars_limit - 1
+
+    def warmup(self, params: dict[str, Any]) -> int:
+        return self.n
+
+    def signal(
+        self, bars: pd.DataFrame, params: dict[str, Any], aux: dict[str, pd.Series]
+    ) -> pd.Series:
+        v = np.zeros(len(bars))
+        v[self.n :] = np.where(bars["close"].to_numpy()[self.n :] > 100.0, 1.0, -1.0)
+        return pd.Series(v, index=bars.index)
+
+
+def test_window_length_matches_runtime_when_warmup_is_bars_limit_minus_1(
+    tmp_path: Path,
+) -> None:
+    from agenkit_trader.backtest.runtime_policy import WindowError, window_signals
+
+    strat = EdgeStrategy(RT.bars_limit)
+    first = RT.bars_limit + 5
+    bars = _walk(3, first + 30)
+    rt = _runtime_signals(tmp_path, bars, strat, {"k": 1}, first)
+    tgt, prv = window_signals(strat, bars, {"k": 1}, {}, RT.bars_limit, first)
+    assert [rt[t] for t in range(first, len(bars))] == list(
+        zip(tgt.tolist(), prv.tolist(), strict=True)
+    )
+    # trades (non-zero) exist in a window of exactly bars_limit closed bars;
+    # prev is the zeroed warm-up row, so every bar is a transition
+    assert (tgt != 0).all() and (prv == 0).all()
+    with pytest.raises(WindowError):
+        window_signals(
+            EdgeStrategy(RT.bars_limit + 1), bars, {"k": 1}, {}, RT.bars_limit, first
+        )

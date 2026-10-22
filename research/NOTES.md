@@ -133,3 +133,30 @@ deployed.json are untouched and the committed run's numbers are unchanged.
   for both policies. The committed research-policy run's file is empty, so
   nothing changes for it, but any future research-policy pass cannot be paper
   traded.
+
+## Simulator follow-ups: pre-count guard, funding window, docs (added later)
+
+No research run was made; REPORT.*, trials.json and deployed.json are
+untouched and the committed run's numbers are unchanged.
+
+- Guard before counting. Under `policy="runtime"`, `evaluate` and
+  `evaluate_candidates` now check the warm-up of every grid point of every
+  candidate against the runtime window before any `counter.add`, so a
+  `WindowError` can no longer leave counted trials behind.
+- Funding window. The runtime fetches only the last `FUNDING_LIMIT` (1000)
+  funding records and as-of aligns them to its window. `window_signals` now
+  rebuilds each window's funding that way from the raw records (last 1000
+  stamped at or before the close of bar t), so bars whose record fell outside
+  the tail get NaN, as in the runtime. With 8-hourly records and
+  `bars_limit` 1000 hourly bars the tail covers about 125 records, so the cap
+  never bites in practice; it matters only if the window held more than 1000
+  records. Parity tests (real Runtime + FakeVenue) now cover funding_reversion,
+  short_reversion, a tiny-FUNDING_LIMIT truncation case and a strategy whose
+  warm-up is `bars_limit - 1`. No runtime/simulator mismatch was found. One
+  approximation remains: a record stamped between the bar close and the
+  runtime's poll time is counted as fetched only if stamped at or before the
+  close.
+- Docs/dead code. The gate docstring now says full-history signals apply to the
+  research policy only, and the unused `prev_signal` computed from the full
+  history under the runtime policy is gone (the per-bar window `prev` is what
+  the simulator uses).

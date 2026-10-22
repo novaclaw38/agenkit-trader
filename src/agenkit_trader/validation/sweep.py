@@ -138,7 +138,13 @@ def backtest_params(
         rp = runtime_policy or RuntimePolicy()
         hist = bars if warmup is None else pd.concat([warmup, bars])
         tgt, prv = window_signals(
-            strategy, hist, params, aux, rp.runtime.bars_limit, len(hist) - len(bars)
+            strategy,
+            hist,
+            params,
+            aux,
+            rp.runtime.bars_limit,
+            len(hist) - len(bars),
+            funding=funding,
         )
         pos = to_positions(
             pd.Series(tgt, index=bars.index), pd.DatetimeIndex(bars.index)

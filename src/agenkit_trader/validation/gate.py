@@ -4,13 +4,17 @@ Protocol (statistical honesty first):
 
 1. ``split_by_time``: the last ``holdout_frac`` of history is the hold-out.
 2. Every grid point is counted in the persistent ``TrialCounter`` *before*
-   it is run, so the multiple-testing adjustment covers everything tried.
+   it is run (under the runtime policy, after every grid point's warm-up has
+   been checked against the runtime window, so a ``WindowError`` leaves no
+   counted trials), so the multiple-testing adjustment covers everything tried.
 3. Parameters are chosen by ``neighbourhood_sweep`` on the TRAIN segment
    only (signals are computed on train bars alone; no hold-out data is seen).
 4. The hold-out is evaluated exactly once, with the train-chosen setting.
-   Signals there are computed on the full history (so indicators can warm up
-   on train data) and the strategy is first checked with
-   ``assert_no_lookahead``; any lookahead rejects it.
+   Under the research policy signals there are computed on the full history
+   (so indicators can warm up on train data); under the runtime policy each
+   hold-out signal comes from the runtime's rolling window instead (see
+   Policy). The strategy is first checked with ``assert_no_lookahead`` (on
+   the full history, both policies); any lookahead rejects it.
 5. Checks on the hold-out (thresholds from ``GateConfig``, never tuned here):
    not ruined; trades >= ``min_trades`` (zero trades is its own reason); net
    return > 0; annualised Sharpe >= ``min_sharpe``; drawdown <=
@@ -37,10 +41,11 @@ Policy. ``policy`` selects what is simulated (``validation/sweep.py``):
 runtime trades). The sweep, the train re-run, the hold-out, the cost
 re-run and the regime split all use the same policy. Under ``"runtime"`` the
 hold-out simulation gets the train bars as ATR warm-up history (only bars
-before each decision are used) and the sign of the signal on the last train
-bar as ``prev_signal`` (a signal already on across the split is not an
-entry). A hold-out (or cost re-run) that trips the runtime's daily-loss /
-drawdown kill switch is rejected.
+before each decision are used) and each bar's ``prev`` is read from the same
+rolling window (a signal already on across the split is not an entry).
+Funding for ``aux_required`` strategies is capped to the runtime's last
+``FUNDING_LIMIT`` records (``window_signals``). A hold-out (or cost re-run)
+that trips the runtime's daily-loss / drawdown kill switch is rejected.
 
 Win rate is gated by ``min_win_rate``, a sanity floor (Sharpe and profit
 factor are the binding checks).
@@ -57,7 +62,11 @@ import pandas as pd
 
 from agenkit_trader.backtest.costs import CostModel
 from agenkit_trader.backtest.engine import BacktestResult
-from agenkit_trader.backtest.runtime_policy import RuntimePolicy, window_signals
+from agenkit_trader.backtest.runtime_policy import (
+    RuntimePolicy,
+    check_warmup,
+    window_signals,
+)
 from agenkit_trader.backtest.stats import Stats, compute_stats
 from agenkit_trader.config import GateConfig
 from agenkit_trader.data.lookahead import LookaheadError, assert_no_lookahead
@@ -234,6 +243,14 @@ def _fmt(x: float) -> str:
     return str(x) if not math.isfinite(x) else f"{x:.3f}"
 
 
+def _precheck_windows(strategy: Strategy, rp: RuntimePolicy | None) -> None:
+    """Runtime policy: every grid point's warm-up must fit the runtime window
+    (``WindowError`` otherwise). Run BEFORE any trial is counted."""
+    bars_limit = (rp or RuntimePolicy()).runtime.bars_limit
+    for p in grid_points(strategy.param_grid):
+        check_warmup(strategy, p, bars_limit)
+
+
 def evaluate(
     strategy: Strategy,
     bars: pd.DataFrame,
@@ -262,6 +279,9 @@ def evaluate(
     train, hold = split_by_time(bars, gate_cfg.holdout_frac)
     full = pd.concat([train, hold])
     grid = strategy.param_grid
+    if policy == "runtime":
+        # a guard failure must not leave counted trials
+        _precheck_windows(strategy, runtime_policy)
     if n_trials is None:
         n_trials = counter.add(len(grid_points(grid)))
     # the engine ignores funding outside each segment's span
@@ -306,22 +326,27 @@ def evaluate(
         reasons.append(f"lookahead detected: {e}")
 
     # --- the single hold-out evaluation ---
-    full_pos = sig(full)
-    pos = full_pos.loc[hold.index]
-    # runtime policy: the train bars are ATR history for the hold-out, and
-    # the signal on the last train bar decides whether hold-out bar 0 is a
-    # transition (the runtime never enters mid-signal)
-    warm = train if policy == "runtime" else None
-    prev = float(np.sign(full_pos.loc[train.index[-1]]))
+    warm = None
+    prev = 0.0
     prev_signals = None
     if policy == "runtime":
-        # ... and each hold-out signal comes from the runtime's rolling window
-        # over train + hold-out, not the full history
+        # the train bars are ATR history for the hold-out, and each hold-out
+        # signal (and its ``prev``, including bar 0's) comes from the
+        # runtime's rolling window over train + hold-out, not the full history
+        warm = train
         rp = runtime_policy or RuntimePolicy()
         tgt, prev_signals = window_signals(
-            strategy, full, params, full_aux, rp.runtime.bars_limit, len(train)
+            strategy,
+            full,
+            params,
+            full_aux,
+            rp.runtime.bars_limit,
+            len(train),
+            funding=funding,
         )
         pos = pd.Series(tgt, index=hold.index)
+    else:
+        pos = sig(full).loc[hold.index]
     c2_costs = costs.scaled(gate_cfg.cost_multiplier)
     ho, c2 = (
         simulate(
@@ -442,6 +467,10 @@ def evaluate_candidates(
     """
     if not candidates:
         return []
+    check_policy(policy)
+    if policy == "runtime":
+        for c in candidates:
+            _precheck_windows(c.strategy, c.runtime_policy or runtime_policy)
     n_new = sum(len(grid_points(c.strategy.param_grid)) for c in candidates)
     n_trials = counter.add(n_new)
     return [

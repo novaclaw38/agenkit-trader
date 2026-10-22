@@ -141,10 +141,13 @@ from agenkit_trader.backtest.engine import (
 )
 from agenkit_trader.backtest.stats import compute_stats
 from agenkit_trader.config import RiskConfig, RuntimeConfig
+from agenkit_trader.data.align import align_asof
 from agenkit_trader.execution.venue import AccountState, Order, SymbolRules
 from agenkit_trader.risk.gate import RiskGate
 from agenkit_trader.risk.sizing import size_position
+from agenkit_trader.runtime import loop as _loop
 from agenkit_trader.runtime.loop import protective_stop
+from agenkit_trader.strategies.funding_reversion import FUNDING_AVAILABLE_LAG
 
 TRADE_COLUMNS = [
     "entry_time",
@@ -166,20 +169,10 @@ class WindowError(ValueError):
     """A grid point cannot be evaluated on the runtime's window."""
 
 
-def window_signals(
-    strategy: Any,
-    hist: pd.DataFrame,
-    params: dict[str, Any],
-    aux: dict[str, pd.Series],
-    bars_limit: int,
-    start: int = 0,
-) -> tuple[np.ndarray, np.ndarray]:
-    """``(target, prev)`` signs for rows ``start..`` of ``hist``, each from
-    the runtime's window ``hist[t-bars_limit+1 : t+1]`` (shorter at the start
-    of ``hist``): ``target = sign(signal[-1])``, ``prev = sign(signal[-2])``
-    of that window, as ``Runtime._step`` reads them. ``aux`` must be indexed
-    like ``hist``. Cost: see the module docstring."""
-    n = len(hist)
+def check_warmup(strategy: Any, params: dict[str, Any], bars_limit: int) -> None:
+    """Raise ``WindowError`` if ``params`` needs a warm-up of ``bars_limit``
+    bars or more (the runtime window holds ``bars_limit`` closed bars, so a
+    warm-up of ``bars_limit - 1`` still fits)."""
     wf = getattr(strategy, "warmup", None)
     need = int(wf(params)) if callable(wf) else 0
     if need >= bars_limit:
@@ -188,15 +181,61 @@ def window_signals(
             f"runtime window of {bars_limit} bars: the runtime would never "
             "trade this parameter point"
         )
+
+
+def window_signals(
+    strategy: Any,
+    hist: pd.DataFrame,
+    params: dict[str, Any],
+    aux: dict[str, pd.Series],
+    bars_limit: int,
+    start: int = 0,
+    funding: pd.Series | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """``(target, prev)`` signs for rows ``start..`` of ``hist``, each from
+    the runtime's window ``hist[t-bars_limit+1 : t+1]`` (shorter at the start
+    of ``hist``): ``target = sign(signal[-1])``, ``prev = sign(signal[-2])``
+    of that window, as ``Runtime._step`` reads them. ``aux`` must be indexed
+    like ``hist``. Cost: see the module docstring.
+
+    Funding. The runtime fetches only the last ``FUNDING_LIMIT`` funding
+    records and as-of aligns them to its window (``Runtime._aux``). When
+    ``funding`` (the RAW records) is given and the strategy needs
+    ``aux["funding"]``, each window's funding is rebuilt that way: the last
+    ``FUNDING_LIMIT`` records stamped at or before the window's end (the
+    close of bar ``t``; a record stamped exactly then is fetched by the
+    runtime), aligned with ``FUNDING_AVAILABLE_LAG``; window bars whose
+    record fell outside that tail get NaN. Without ``funding`` the given
+    ``aux`` is used as is (full-history alignment)."""
+    n = len(hist)
+    check_warmup(strategy, params, bars_limit)
     aux = {k: v.reindex(hist.index) for k, v in aux.items()}
+    capped = (
+        funding is not None
+        and n > 1
+        and "funding" in getattr(strategy, "aux_required", ())
+    )
+    if capped:
+        assert funding is not None
+        funding = funding.sort_index()
+        f_idx = funding.index
+        step = pd.Timedelta(hist.index[1] - hist.index[0])
     target = np.zeros(n - start)
     prev = np.zeros(n - start)
     for j, t in enumerate(range(start, n)):
         lo = max(0, t + 1 - bars_limit)
         w = hist.iloc[lo : t + 1]
-        sig = strategy.signal(
-            w, params, {k: v.iloc[lo : t + 1] for k, v in aux.items()}
-        )
+        w_aux = {k: v.iloc[lo : t + 1] for k, v in aux.items()}
+        if capped:
+            assert funding is not None
+            hi = int(f_idx.searchsorted(hist.index[t] + step, side="right"))
+            raw = funding.iloc[max(0, hi - _loop.FUNDING_LIMIT) : hi]
+            w_aux["funding"] = (
+                align_asof(w, raw, FUNDING_AVAILABLE_LAG, step)
+                if len(raw)
+                else pd.Series(np.nan, index=w.index)
+            )
+        sig = strategy.signal(w, params, w_aux)
         v = np.nan_to_num(sig.to_numpy(dtype="float64")[-2:], nan=0.0)
         target[j] = np.sign(v[-1])
         prev[j] = np.sign(v[-2]) if len(v) > 1 else 0.0

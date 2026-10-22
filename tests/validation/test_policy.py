@@ -141,14 +141,14 @@ def test_runtime_policy_routes_every_backtest_through_the_simulator(
     assert v.holdout.n_trades > 0
     assert set(v.regimes) == set(vgate.REGIMES)
     assert v.cost_2x.total_return < v.holdout.total_return
-    # the hold-out runs get the train bars as warm-up and the signal of the
-    # last train bar as prev_signal
+    # the hold-out runs get the train bars as warm-up and per-bar prev signals
+    # from the runtime window (bar 0's is the last train bar's signal)
     bars, aux = ranged_market
     hold = [c for c in calls if c.get("warmup") is not None]
     assert len(hold) == 2
     train_end = hold[0]["warmup"].index[-1]
     full_sig = FeatureStrategy().signal(bars, v.params, aux)
-    assert hold[0]["prev_signal"] == float(np.sign(full_sig.loc[train_end]))
+    assert hold[0]["prev_signals"][0] == float(np.sign(full_sig.loc[train_end]))
 
 
 def test_runtime_policy_differs_from_research(
@@ -324,3 +324,34 @@ def test_grid_point_beyond_the_runtime_window_is_refused() -> None:
             policy="runtime",
             runtime_policy=rp,
         )
+
+
+def test_window_guard_failure_leaves_no_counted_trials(tmp_path: Path) -> None:
+    """Under policy=runtime every grid point is warm-up checked BEFORE any
+    trial is counted (evaluate and evaluate_candidates)."""
+    from agenkit_trader.backtest.runtime_policy import WindowError
+    from agenkit_trader.validation.gate import Candidate, evaluate_candidates
+
+    class Wide(FeatureStrategy):
+        def warmup(self, params: dict[str, Any]) -> int:
+            return int(params["lookback"])
+
+    bars, aux = market(1, n=900)
+    wide = Wide()
+    wide.param_grid = {"lookback": [10, 5000]}
+    path = tmp_path / "trials.json"
+    counter = TrialCounter(path)
+    counter.add(7)
+    before = path.read_text()
+    with pytest.raises(WindowError, match="runtime window"):
+        evaluate(wide, bars, aux, costs(), gate_cfg(), counter, policy="runtime")
+    assert path.read_text() == before and counter.total == 7
+    with pytest.raises(WindowError, match="runtime window"):
+        evaluate_candidates(
+            [Candidate(FeatureStrategy(), bars, aux), Candidate(wide, bars, aux)],
+            costs(),
+            gate_cfg(),
+            counter,
+            policy="runtime",
+        )
+    assert path.read_text() == before and counter.total == 7
