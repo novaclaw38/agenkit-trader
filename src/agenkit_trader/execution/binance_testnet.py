@@ -29,7 +29,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 import pandas as pd
@@ -41,12 +41,19 @@ from agenkit_trader.execution.venue import (
     Fill,
     OpenOrder,
     Order,
+    OrderNotFilledError,
+    OrderStatus,
+    OrderStatusUnknownError,
     Position,
     SymbolRules,
     VenueError,
 )
 
-DEFAULT_BASE_URL = "https://testnet.binancefuture.com"
+TESTNET_HOST = "testnet.binancefuture.com"
+DEFAULT_BASE_URL = f"https://{TESTNET_HOST}"
+# Terminal statuses: nothing more will execute.
+_TERMINAL = {"CANCELED", "EXPIRED", "REJECTED", "EXPIRED_IN_MATCH"}
+_ORDER_DOES_NOT_EXIST = -2013
 _RULES_TTL_MS = 3_600_000
 
 __all__ = [
@@ -109,6 +116,29 @@ def _fmt(x: float, step: float) -> str:
     return f"{x:.{_decimals(step)}f}"
 
 
+def _check_base_url(base_url: str, test_host: str | None) -> str:
+    """Only https://testnet.binancefuture.com (no port, path or userinfo) is
+    accepted, so mainnet is structurally unreachable from this class. Tests
+    may name one extra host with the explicit ``_test_host`` argument."""
+    u = urlsplit(base_url)
+    allowed = {TESTNET_HOST} | ({test_host} if test_host else set())
+    ok = (
+        u.scheme == "https"
+        and u.hostname in allowed
+        and u.port is None
+        and u.username is None
+        and u.password is None
+        and u.path in ("", "/")
+        and not u.query
+        and not u.fragment
+    )
+    if not ok:
+        raise ValueError(
+            f"base_url must be https://{TESTNET_HOST} (testnet only), got {base_url!r}"
+        )
+    return f"https://{u.hostname}"
+
+
 def _ts(ms: object) -> pd.Timestamp:
     return pd.Timestamp(int(str(ms)), unit="ms", tz="UTC")
 
@@ -124,8 +154,9 @@ class BinanceTestnetVenue:
         timeout_s: float = 10.0,
         transport: httpx.BaseTransport | None = None,
         clock_ms: Callable[[], int] | None = None,
+        _test_host: str | None = None,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
+        self.base_url = _check_base_url(base_url, _test_host)
         self._key_env = key_env
         self._secret_env = secret_env
         key, secret = os.environ.get(key_env, ""), os.environ.get(secret_env, "")
@@ -353,10 +384,17 @@ class BinanceTestnetVenue:
             params["reduceOnly"] = "true"
         r = self._request("POST", "/fapi/v1/order", params, signed=True)
         executed = float(r.get("executedQty") or 0)
+        status = str(r.get("status"))
         if not executed > 0:
-            raise VenueError(
-                f"market order {client_id or '?'} on {symbol} not filled: "
-                f"status {r.get('status')}"
+            if status in _TERMINAL:
+                raise OrderNotFilledError(
+                    f"market order {client_id or '?'} on {symbol} not filled: "
+                    f"status {status}"
+                )
+            # e.g. NEW: accepted, outcome not known yet; it may still fill
+            raise OrderStatusUnknownError(
+                f"market order {client_id or '?'} on {symbol}: status {status}, "
+                "executedQty 0 (outcome unknown)"
             )
         t = r.get("updateTime")
         when = (
@@ -407,6 +445,34 @@ class BinanceTestnetVenue:
             params["clientAlgoId"] = order.client_id
         r = self._request("POST", "/fapi/v1/algoOrder", params, signed=True)
         return str(r.get("algoId", ""))
+
+    def get_order(self, symbol: str, client_id: str) -> OrderStatus | None:
+        """Query an order by ``origClientOrderId``; None if it does not exist."""
+        try:
+            r = self._request(
+                "GET",
+                "/fapi/v1/order",
+                {"symbol": symbol, "origClientOrderId": client_id},
+                signed=True,
+            )
+        except BinanceAPIError as exc:
+            if exc.code == _ORDER_DOES_NOT_EXIST:
+                return None
+            raise
+        return OrderStatus(
+            client_id=str(r.get("clientOrderId", client_id)),
+            status=str(r.get("status")),
+            executed_qty=float(r.get("executedQty") or 0),
+            avg_price=float(r.get("avgPrice") or 0),
+        )
+
+    def cancel_stop(self, symbol: str, client_id: str) -> None:
+        self._request(
+            "DELETE",
+            "/fapi/v1/algoOrder",
+            {"symbol": symbol, "clientAlgoId": client_id},
+            signed=True,
+        )
 
     def cancel_open_orders(self, symbol: str) -> None:
         errors: list[str] = []

@@ -24,11 +24,7 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-from agenkit_trader.config import (
-    load_gate_config,
-    load_risk_config,
-    load_runtime_config,
-)
+from agenkit_trader.config import load_risk_config, load_runtime_config
 from agenkit_trader.execution.binance_testnet import BinanceTestnetVenue
 from agenkit_trader.killswitch import RESUME_PHRASE, KillSwitch
 from agenkit_trader.log import DecisionLog, file_sha256
@@ -36,6 +32,7 @@ from agenkit_trader.risk.gate import RiskGate
 from agenkit_trader.runtime.loop import (
     DeployedError,
     StartupRefused,
+    check_state_ready,
     load_deployed,
     reset_halt,
     run_loop,
@@ -62,7 +59,16 @@ def _sha(path: Path) -> str | None:
         return None
 
 
+def _anchor(p: Path) -> Path:
+    """Relative paths are anchored to the repository root, never the cwd, so
+    the same command always finds the same state, log and configs."""
+    p = Path(p).expanduser()
+    return p if p.is_absolute() else ROOT / p
+
+
 def _paper(a: argparse.Namespace) -> int:
+    for name in ("config", "runtime", "gate", "deployed", "log", "state"):
+        setattr(a, name, _anchor(getattr(a, name)))
     log = DecisionLog(a.log)
 
     def refuse(msg: str) -> int:
@@ -81,6 +87,8 @@ def _paper(a: argparse.Namespace) -> int:
             "deployed": str(a.deployed),
             "deployed_sha256": _sha(a.deployed),
             "once": a.once,
+            "state": str(a.state),
+            "init_state": a.init_state,
         },
         {},
         "starting",
@@ -88,13 +96,18 @@ def _paper(a: argparse.Namespace) -> int:
     try:
         risk = load_risk_config(a.config)
         rt_cfg = load_runtime_config(a.runtime)
-        gate_cfg = load_gate_config(a.gate)
     except (OSError, ValueError, TypeError) as exc:
         return refuse(f"bad configuration: {exc}")
     try:
         deployed = load_deployed(a.deployed)
         validate_deployments(deployed, REGISTRY)
     except (DeployedError, StartupRefused) as exc:
+        return refuse(str(exc))
+    _err(f"paper: state file: {a.state}")
+    _err(f"paper: decision log: {a.log}")
+    try:
+        check_state_ready(a.state, a.log, a.init_state)
+    except StartupRefused as exc:
         return refuse(str(exc))
     missing = [v for v in (KEY_ENV, SECRET_ENV) if not os.environ.get(v)]
     if missing:
@@ -118,9 +131,9 @@ def _paper(a: argparse.Namespace) -> int:
             log,
             lambda: datetime.now(UTC),
             runtime_cfg=rt_cfg,
-            regime_window=gate_cfg.regime_window,
             max_cycles=1 if a.once else None,
             state_path=a.state,
+            init_state=a.init_state,
         )
     except StartupRefused as exc:
         return refuse(str(exc))
@@ -139,6 +152,8 @@ def _paper(a: argparse.Namespace) -> int:
 
 
 def _reset_halt(a: argparse.Namespace) -> int:
+    a.state, a.log = _anchor(a.state), _anchor(a.log)
+    print(f"state file: {a.state}\ndecision log: {a.log}")
     phrase = input(f"Type {RESUME_PHRASE} to clear the halt: ")
     if phrase != RESUME_PHRASE:
         _err("reset-halt: confirmation phrase not given; halt kept")
@@ -177,6 +192,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--log", type=Path, default=Path("logs/paper.jsonl"))
     p.add_argument("--state", type=Path, default=Path("state/paper_state.json"))
     p.add_argument("--once", action="store_true", help="run a single cycle")
+    p.add_argument(
+        "--init-state",
+        action="store_true",
+        help="create a NEW state file if none exists (new paper account)",
+    )
     r = sub.add_parser("reset-halt", help="clear a persisted kill-switch halt")
     r.add_argument("--state", type=Path, default=Path("state/paper_state.json"))
     r.add_argument("--log", type=Path, default=Path("logs/paper.jsonl"))

@@ -113,12 +113,22 @@ def test_paper_refuses_without_keys(
                     "symbol": "BTCUSDT",
                     "interval": "1h",
                     "params": {"lookback": 96, "vol_cap": 1.5},
-                    "allowed_regimes": ["trend"],
+                    "allowed_regimes": ["range", "trend"],
                 }
             ]
         )
     )
-    assert paper("--deployed", str(d), "--runtime", RUNTIME, tmp_path=tmp_path) != 0
+    rc = paper(
+        "--deployed",
+        str(d),
+        "--runtime",
+        RUNTIME,
+        "--init-state",
+        "--state",
+        str(tmp_path / "s.json"),
+        tmp_path=tmp_path,
+    )
+    assert rc != 0
     assert "BINANCE_TESTNET_KEY" in capsys.readouterr().err
     assert no_network == []
 
@@ -164,3 +174,113 @@ def test_console_script_declared() -> None:
 def test_no_live_flag() -> None:
     with pytest.raises(SystemExit):
         cli.main(["paper", "--config", RISK, "--live"])
+
+
+# ---------------------------------------------------------------- fix round 1
+
+
+def _deployed(tmp_path: Path, regimes: list[str] | None = None) -> Path:
+    d = tmp_path / "deployed.json"
+    d.write_text(
+        json.dumps(
+            [
+                {
+                    "name": "trend_breakout",
+                    "symbol": "BTCUSDT",
+                    "interval": "1h",
+                    "params": {"lookback": 96, "vol_cap": 1.5},
+                    "allowed_regimes": regimes or ["range", "trend"],
+                }
+            ]
+        )
+    )
+    return d
+
+
+@pytest.fixture
+def fake_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BINANCE_TESTNET_KEY", "k-not-real")
+    monkeypatch.setenv("BINANCE_TESTNET_SECRET", "s-not-real")
+
+
+def test_paper_refuses_regime_restricted_deployment(
+    no_network: list[str], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    d = _deployed(tmp_path, ["trend"])
+    assert paper("--deployed", str(d), tmp_path=tmp_path) != 0
+    assert "regime-restricted" in capsys.readouterr().err
+    assert no_network == []
+
+
+def test_paper_refuses_missing_state_without_init(
+    no_network: list[str],
+    fake_keys: None,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    state = tmp_path / "new" / "state.json"
+    rc = paper(
+        "--deployed", str(_deployed(tmp_path)), "--state", str(state), tmp_path=tmp_path
+    )
+    err = capsys.readouterr().err
+    assert rc != 0 and "--init-state" in err and str(state) in err
+    assert no_network == [] and not state.exists()
+
+
+def test_relative_state_path_is_anchored_to_repo_root(
+    no_network: list[str],
+    fake_keys: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    paper("--deployed", str(_deployed(tmp_path)), tmp_path=tmp_path)
+    err = capsys.readouterr().err
+    assert f"state file: {ROOT / 'state' / 'paper_state.json'}" in err
+
+
+def test_logged_halt_refuses_even_with_init_state(
+    no_network: list[str],
+    fake_keys: None,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from agenkit_trader.log import DecisionLog
+
+    log = tmp_path / "paper.jsonl"
+    DecisionLog(log).write(
+        "kill_switch", {"reason": "x"}, {"halted": True}, "flattened"
+    )
+    rc = paper(
+        "--deployed",
+        str(_deployed(tmp_path)),
+        "--state",
+        str(tmp_path / "fresh.json"),
+        "--init-state",
+        tmp_path=tmp_path,
+    )
+    assert rc != 0 and "halt" in capsys.readouterr().err
+    assert no_network == []
+
+
+def test_reset_halt_requires_phrase_and_is_logged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agenkit_trader.log import DecisionLog
+    from agenkit_trader.runtime.loop import last_unreset_halt
+
+    log = tmp_path / "paper.jsonl"
+    state = tmp_path / "state.json"
+    DecisionLog(log).write(
+        "kill_switch", {"reason": "x"}, {"halted": True}, "flattened"
+    )
+    args = ["reset-halt", "--state", str(state), "--log", str(log)]
+    monkeypatch.setattr("builtins.input", lambda prompt: "resume")
+    assert cli.main(args) != 0
+    assert last_unreset_halt(log) is not None
+    monkeypatch.setattr("builtins.input", lambda prompt: "RESUME")
+    assert cli.main(args) == 0
+    assert last_unreset_halt(log) is None
+    last = json.loads(log.read_text().splitlines()[-1])
+    assert last["kind"] == "runtime" and last["result"] == "halt_reset"

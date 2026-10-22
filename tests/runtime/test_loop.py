@@ -1,6 +1,7 @@
 """Runtime loop against FakeVenue: every order via the gate, fail closed."""
 
 import json
+from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -13,12 +14,15 @@ from agenkit_trader.config import RiskConfig, RuntimeConfig
 from agenkit_trader.execution.venue import (
     ClockSkewError,
     Order,
+    OrderStatus,
+    OrderStatusUnknownError,
     Position,
     SymbolRules,
+    VenueError,
 )
 from agenkit_trader.killswitch import KillSwitch
 from agenkit_trader.log import DecisionLog
-from agenkit_trader.regime import REGIMES, label_regimes
+from agenkit_trader.regime import REGIMES
 from agenkit_trader.risk.gate import RiskGate
 from agenkit_trader.runtime.loop import (
     DeployedError,
@@ -27,7 +31,9 @@ from agenkit_trader.runtime.loop import (
     StartupRefused,
     check_clock_skew,
     client_order_id,
+    last_unreset_halt,
     load_deployed,
+    reset_halt,
     run_loop,
     validate_deployments,
 )
@@ -36,7 +42,6 @@ from fakes import T0, FakeVenue
 STEP = pd.Timedelta(hours=1)
 NOW = T0 + timedelta(seconds=30)  # bar opened 11:00 closed at T0=12:00
 LAST = pd.Timestamp(T0) - STEP  # open time of the latest CLOSED bar
-WINDOW = 5
 
 
 def make_bars(
@@ -146,8 +151,8 @@ class Harness:
             self.log,
             lambda: self.now,
             runtime_cfg=self.rt_cfg,
-            regime_window=WINDOW,
             state_path=self.state_path,
+            init_state=True,
         )
 
     def records(self, kind: str | None = None) -> list[dict[str, Any]]:
@@ -314,44 +319,25 @@ def test_flip_exits_then_enters(tmp_path: Path) -> None:
 # ---------------------------------------------------------------- regimes
 
 
-def _last_regime() -> str:
-    lab = label_regimes(make_bars(forming=False), WINDOW).iloc[-1]
-    assert not np.isnan(lab)
-    return REGIMES[int(lab)]
+def test_regime_restricted_deployment_is_refused_at_start(tmp_path: Path) -> None:
+    # v1 fails closed: runtime labels cannot reproduce research's
+    # full-history labels exactly, so a restricted deployment never runs.
+    for allowed in (("trend",), ("range",), ()):
+        h = Harness(
+            tmp_path / "-".join(allowed or ("none",)),
+            strategy=Scripted({LAST: 1.0}),
+            deployments=[dep(allowed=allowed)],
+        )
+        with pytest.raises(StartupRefused, match="regime"):
+            h.rt.start()
+        assert h.venue.orders == []
 
 
-def test_regime_restriction_blocks_entry(tmp_path: Path) -> None:
-    other = [r for r in REGIMES if r != _last_regime()]
-    h = Harness(
-        tmp_path,
-        strategy=Scripted({LAST: 1.0}),
-        deployments=[dep(allowed=tuple(other))],
-    )
-    h.rt.start()
-    h.rt.cycle()
-    assert h.venue.orders == []
-    blocked = [r for r in h.records("entry") if r["result"] == "regime_blocked"]
-    assert blocked and blocked[0]["inputs"]["regime"] == _last_regime()
-
-
-def test_regime_allowed_enters(tmp_path: Path) -> None:
-    h = Harness(
-        tmp_path,
-        strategy=Scripted({LAST: 1.0}),
-        deployments=[dep(allowed=(_last_regime(),))],
-    )
+def test_unrestricted_deployment_enters_without_regime_label(tmp_path: Path) -> None:
+    h = Harness(tmp_path, strategy=Scripted({LAST: 1.0}), deployments=[dep()])
     h.rt.start()
     h.rt.cycle()
     assert len(h.venue.orders) == 1
-
-
-def test_exit_allowed_in_any_regime(tmp_path: Path) -> None:
-    v = FakeVenue(now=NOW, positions={"BTCUSDT": Position("BTCUSDT", 0.5, 100.0)})
-    v.stops.append(Order("BTCUSDT", "sell", 0.5, 100.0, 90.0, "scripted", "o", True))
-    h = Harness(tmp_path, venue=v, strategy=Scripted({}), deployments=[dep(allowed=())])
-    h.rt.start()
-    h.rt.cycle()
-    assert len(v.orders) == 1 and v.positions == {}
 
 
 # ---------------------------------------------------------------- restart
@@ -446,7 +432,7 @@ def test_run_loop_stops_after_api_error_halt(tmp_path: Path) -> None:
             h.log,
             lambda: h.now,
             runtime_cfg=h.rt_cfg,
-            regime_window=WINDOW,
+            init_state=True,
             sleep=slept.append,
             max_cycles=100,
             state_path=h.state_path,
@@ -471,7 +457,7 @@ def test_run_loop_cycles_until_halt(tmp_path: Path) -> None:
         h.log,
         lambda: h.now,
         runtime_cfg=h.rt_cfg,
-        regime_window=WINDOW,
+        init_state=True,
         sleep=sleep,
         max_cycles=100,
         state_path=h.state_path,
@@ -493,7 +479,7 @@ def test_halted_loop_refuses_to_place_orders(tmp_path: Path) -> None:
         h.log,
         lambda: h.now,
         runtime_cfg=h.rt_cfg,
-        regime_window=WINDOW,
+        init_state=True,
         sleep=lambda s: None,
         max_cycles=3,
         state_path=h.state_path,
@@ -531,8 +517,8 @@ def test_state_halted_blocks_even_if_switch_not_halted(tmp_path: Path) -> None:
 def test_clock_skew_raises(tmp_path: Path) -> None:
     v = FakeVenue(now=NOW + timedelta(milliseconds=1500))
     with pytest.raises(ClockSkewError):
-        check_clock_skew(v, NOW)
-    check_clock_skew(FakeVenue(now=NOW + timedelta(milliseconds=900)), NOW)
+        check_clock_skew(v, lambda: NOW)
+    check_clock_skew(FakeVenue(now=NOW + timedelta(milliseconds=900)), lambda: NOW)
 
 
 def test_clock_skew_halts_and_flattens(tmp_path: Path) -> None:
@@ -681,6 +667,8 @@ def test_validate_deployments() -> None:
     bad = Deployment("scripted", "BTCUSDT", "1h", {"k": 1}, ["sideways"])
     with pytest.raises(StartupRefused, match="regime"):
         validate_deployments([bad], reg)
+    with pytest.raises(StartupRefused, match="regime-restricted"):
+        validate_deployments([dep(allowed=("trend",))], reg)
     bad = Deployment("scripted", "BTCUSDT", "7x", {"k": 1}, ["trend"])
     with pytest.raises(StartupRefused, match="interval"):
         validate_deployments([bad], reg)
@@ -704,3 +692,306 @@ def test_failed_account_read_leaves_bar_retriable(tmp_path: Path) -> None:
     h.rt.cycle()  # same bar, next poll: decided now, exactly once
     h.rt.cycle()
     assert len(h.venue.orders) == 1
+
+
+# ================================================================ fix round 1
+# Issue 1: an open position must never run without an exchange-side stop.
+
+
+def _ambiguous(v: FakeVenue) -> None:
+    """place_order fills on the exchange, then the response is lost."""
+    real = v.place_order
+
+    def place(order: Order) -> Any:
+        real(order)
+        raise VenueError("POST /fapi/v1/order: transport error ReadTimeout")
+
+    v.place_order = place  # type: ignore[method-assign]
+
+
+def _next_bar(h: Harness, k: int, target: float) -> None:
+    nb = make_bars(last_open=LAST + k * STEP)
+    h.venue.bars["BTCUSDT"] = nb
+    h.strategy.targets = {t: target for t in nb.index}
+    h.now = NOW + k * STEP
+    h.venue.now = h.now
+
+
+def test_ambiguous_entry_error_is_resolved_and_protected(tmp_path: Path) -> None:
+    h = enter_long(tmp_path)
+    v = h.venue
+    _ambiguous(v)
+    h.rt.start()
+    h.rt.cycle()
+    qty = v.positions["BTCUSDT"].qty
+    assert qty > 0 and not h.kill.halted
+    assert len(v.stops) == 1 and v.stops[0].qty == qty and v.stops[0].side == "sell"
+    assert any(r["result"] == "filled_after_error" for r in h.records("order"))
+    del v.place_order  # the probe: several later bars, signal stays long
+    for k in range(1, 4):
+        _next_bar(h, k, 1.0)
+        h.rt.cycle()
+        assert len(v.stops) == 1 and not h.kill.halted
+    assert len(v.orders) == 1
+
+
+def test_unknown_entry_that_fills_later_is_protected_next_cycle(tmp_path: Path) -> None:
+    h = enter_long(tmp_path)
+    v = h.venue
+    pending: list[Order] = []
+
+    def unknown(order: Order) -> Any:
+        pending.append(order)
+        v.order_status[order.client_id] = OrderStatus(order.client_id, "NEW", 0.0, 0.0)
+        raise OrderStatusUnknownError("market order status NEW, executedQty 0")
+
+    v.place_order = unknown  # type: ignore[method-assign]
+    h.rt.start()
+    h.rt.cycle()
+    assert v.positions == {} and v.stops == [] and not h.kill.halted
+    assert h.records("order")[-1]["result"] == "unknown"
+    del v.place_order
+    v.place_order(pending[0])  # the exchange fills it afterwards
+    h.now = NOW + timedelta(seconds=30)
+    v.now = h.now
+    h.rt.cycle()  # same bar: no new decision, but the coverage check repairs
+    qty = v.positions["BTCUSDT"].qty
+    assert len(v.stops) == 1 and v.stops[0].qty == qty and v.stops[0].side == "sell"
+    assert len(v.orders) == 1 and not h.kill.halted
+
+
+def _long_with_stop(stop_qty: float = 0.5) -> FakeVenue:
+    v = FakeVenue(now=NOW, positions={"BTCUSDT": Position("BTCUSDT", 0.5, 100.0)})
+    v.stops.append(
+        Order("BTCUSDT", "sell", stop_qty, 100.0, 90.0, "scripted", "old", True)
+    )
+    return v
+
+
+def test_partial_exit_keeps_residual_protected(tmp_path: Path) -> None:
+    v = _long_with_stop()
+    h = Harness(tmp_path, venue=v, strategy=Scripted({}))  # target 0: exit
+    h.rt.start()
+    v.fill_fraction = 0.4
+    h.rt.cycle()
+    assert v.positions["BTCUSDT"].qty == pytest.approx(0.3)
+    covered = sum(s.qty for s in v.stops if s.side == "sell" and s.reduce_only)
+    assert covered >= 0.3 and not h.kill.halted
+    # the residual was never left without a stop: the old one was not cancelled
+    assert [s.client_id for s in v.stops] == ["old"]
+    assert v.cancel_calls == []
+
+
+def test_ambiguous_exit_that_filled_cancels_stop(tmp_path: Path) -> None:
+    v = _long_with_stop()
+    h = Harness(tmp_path, venue=v, strategy=Scripted({}))
+    h.rt.start()
+    _ambiguous(v)
+    h.rt.cycle()
+    assert v.positions == {} and v.stops == [] and not h.kill.halted
+
+
+def test_ambiguous_exit_not_filled_keeps_stop(tmp_path: Path) -> None:
+    v = _long_with_stop()
+    h = Harness(tmp_path, venue=v, strategy=Scripted({}))
+    h.rt.start()
+
+    def lost(order: Order) -> Any:
+        raise VenueError("HTTP 503 execution status unknown")
+
+    v.place_order = lost  # type: ignore[method-assign]
+    h.rt.cycle()
+    assert v.positions["BTCUSDT"].qty == 0.5
+    assert len(v.stops) == 1 and v.stops[0].qty == 0.5
+
+
+def test_cycle_repairs_missing_stop(tmp_path: Path) -> None:
+    v = _long_with_stop()
+    h = Harness(tmp_path, venue=v, strategy=Scripted({LAST: 1.0}))
+    h.rt.start()
+    h.rt.cycle()
+    v.stops.clear()  # e.g. cancelled by hand on the exchange
+    h.now = NOW + timedelta(seconds=30)
+    v.now = h.now
+    h.rt.cycle()
+    assert len(v.stops) == 1
+    assert v.stops[0].qty == 0.5 and v.stops[0].side == "sell"
+    assert v.stops[0].stop_price is not None and v.stops[0].stop_price < 110
+    assert not h.kill.halted and v.orders == []
+
+
+def test_cycle_replaces_insufficient_stop_before_cancelling(tmp_path: Path) -> None:
+    v = _long_with_stop(stop_qty=0.1)
+    h = Harness(tmp_path, venue=v, strategy=Scripted({LAST: 1.0}))
+    events: list[str] = []
+    real_place, real_cancel = v.place_stop, v.cancel_stop
+
+    def place(o: Order) -> str:
+        events.append(f"place {o.qty}")
+        return real_place(o)
+
+    def cancel(sym: str, cid: str) -> None:
+        events.append(f"cancel {cid}")
+        real_cancel(sym, cid)
+
+    v.place_stop = place  # type: ignore[method-assign]
+    v.cancel_stop = cancel  # type: ignore[method-assign]
+    h.rt.start()
+    h.rt.cycle()
+    assert events == ["place 0.5", "cancel old"]
+    assert [s.qty for s in v.stops] == [0.5]
+    assert not h.kill.halted
+
+
+def test_stop_repair_failure_trips_kill_switch(tmp_path: Path) -> None:
+    v = _long_with_stop()
+    h = Harness(tmp_path, venue=v, strategy=Scripted({LAST: 1.0}))
+    h.rt.start()
+    v.stops.clear()
+
+    def broken(o: Order) -> str:
+        raise VenueError("algo order rejected")
+
+    v.place_stop = broken  # type: ignore[method-assign]
+    h.rt.cycle()
+    assert h.kill.halted and v.positions == {}
+    assert h.records("halt")
+
+
+def test_restart_mid_bar_without_stop_places_stop(tmp_path: Path) -> None:
+    later = NOW + timedelta(minutes=20)
+    v = FakeVenue(now=later, positions={"BTCUSDT": Position("BTCUSDT", 0.5, 100.0)})
+    h = Harness(tmp_path, venue=v, strategy=Scripted({LAST: 1.0}), now=later)
+    h.rt.start()
+    assert not h.kill.halted and v.flatten_calls == 0
+    assert len(v.stops) == 1 and v.stops[0].qty == 0.5
+
+
+# Issue 2: state file and persisted halts.
+
+
+def _runtime(h: Harness, state: Path, init: bool, kill: KillSwitch) -> Runtime:
+    return Runtime(
+        h.venue,
+        [h.strategy],
+        h.deployments,
+        h.gate,
+        kill,
+        h.log,
+        lambda: h.now,
+        runtime_cfg=h.rt_cfg,
+        state_path=state,
+        init_state=init,
+    )
+
+
+def test_missing_state_refuses_without_init(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    rt = _runtime(h, tmp_path / "missing.json", False, h.kill)
+    with pytest.raises(StartupRefused, match="--init-state"):
+        rt.start()
+    assert not (tmp_path / "missing.json").exists()
+
+
+def test_init_state_is_logged(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.rt.start()
+    assert [r["result"] for r in h.records("state")] == ["init"]
+    assert h.state_path.exists()
+
+
+def test_logged_halt_blocks_restart_even_with_new_state(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.rt.start()
+    h.kill.trigger("manual")
+    fresh = tmp_path / "other" / "state.json"
+    k2 = KillSwitch(h.venue, h.log, h.risk)
+    with pytest.raises(StartupRefused, match="halt"):
+        _runtime(h, fresh, True, k2).start()
+    assert last_unreset_halt(h.log_path) is not None
+    reset_halt(fresh, h.log)
+    assert last_unreset_halt(h.log_path) is None
+    _runtime(h, fresh, True, k2).start()
+
+
+def test_halt_is_persisted_in_state_file(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.rt.start()
+    h.venue.fail_next = 5
+    for _ in range(5):
+        h.rt.cycle()
+    assert json.loads(h.state_path.read_text())["halted"]
+    assert h.records("halt")
+
+
+# Issue 4a/4b: closed bars by server time; skew at round-trip midpoint.
+
+
+def test_forming_bar_uses_server_time_not_local_clock(tmp_path: Path) -> None:
+    forming_open = LAST + STEP  # closes at T0 + 1h
+    # local clock says the bar closed 2.5 s ago; the venue says only 1.6 s ago,
+    # which is inside the 2 s grace, so the bar is still treated as forming
+    local = pd.Timestamp(T0 + STEP + timedelta(milliseconds=2500)).to_pydatetime()
+    server = pd.Timestamp(T0 + STEP + timedelta(milliseconds=1600)).to_pydatetime()
+    v = FakeVenue(now=server)
+    h = Harness(tmp_path, venue=v, strategy=Scripted({forming_open: 1.0}), now=local)
+    h.rt.start()
+    h.rt.cycle()
+    assert max(h.strategy.seen_last) == LAST
+    assert v.orders == []
+
+
+def test_bar_close_needs_two_second_grace(tmp_path: Path) -> None:
+    forming_open = LAST + STEP
+    just_after = pd.Timestamp(T0 + STEP + timedelta(seconds=1)).to_pydatetime()
+    v = FakeVenue(now=just_after)
+    h = Harness(
+        tmp_path, venue=v, strategy=Scripted({forming_open: 1.0}), now=just_after
+    )
+    h.rt.start()
+    h.rt.cycle()
+    assert max(h.strategy.seen_last) == LAST and v.orders == []
+    later = pd.Timestamp(T0 + STEP + timedelta(seconds=3)).to_pydatetime()
+    h.now = v.now = later
+    h.rt.cycle()  # now past the grace: the bar is closed and decided
+    assert max(h.strategy.seen_last) == forming_open and len(v.orders) == 1
+
+
+def test_skew_check_uses_round_trip_midpoint() -> None:
+    times = iter([NOW, NOW + timedelta(seconds=3)])  # the request took 3 s
+    v = FakeVenue(now=NOW + timedelta(milliseconds=1500))  # stamped mid-flight
+    check_clock_skew(v, lambda: next(times))
+
+
+@dataclass
+class SyncingVenue(FakeVenue):
+    sync_calls: int = 0
+
+    def sync_time(self) -> int:
+        self.sync_calls += 1
+        return 0
+
+
+def test_venue_offset_is_resynced_every_cycle(tmp_path: Path) -> None:
+    v = SyncingVenue(now=NOW)
+    h = Harness(tmp_path, venue=v)
+    h.rt.start()
+    h.rt.cycle()
+    h.rt.cycle()
+    assert v.sync_calls == 3
+
+
+def test_bars_request_never_exceeds_binance_max(tmp_path: Path) -> None:
+    seen: list[int] = []
+    v = FakeVenue(now=NOW)
+    real = v.get_bars
+
+    def get_bars(sym: str, interval: str, limit: int) -> pd.DataFrame:
+        seen.append(limit)
+        return real(sym, interval, limit)
+
+    v.get_bars = get_bars  # type: ignore[method-assign]
+    h = Harness(tmp_path, venue=v, rt=RuntimeConfig(bars_limit=1499))
+    h.rt.start()
+    h.rt.cycle()
+    assert seen and max(seen) <= 1500

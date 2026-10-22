@@ -106,7 +106,8 @@ class RuntimeConfig:
     # placed on the exchange as a reduce-only STOP_MARKET after every entry.
     stop_atr_mult: float = 3.0
     atr_window: int = 14
-    # Closed-bar history fetched per cycle (Binance klines max 1500 per call).
+    # Closed-bar history fetched per cycle. One extra (forming) bar is
+    # requested, and Binance returns at most 1500 klines, so the cap is 1499.
     bars_limit: int = 1000
     poll_interval_s: float = 30.0
     recv_window_ms: int = 5000
@@ -126,7 +127,7 @@ class RuntimeConfig:
                 raise ValueError(f"{name} must be finite and > 0, got {v!r}")
         for name, hi in (
             ("atr_window", None),
-            ("bars_limit", 1500),
+            ("bars_limit", 1499),
             ("recv_window_ms", 60_000),
         ):
             v = getattr(self, name)

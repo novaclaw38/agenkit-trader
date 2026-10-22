@@ -19,7 +19,14 @@ from agenkit_trader.execution.binance_testnet import (
     BinanceTestnetVenue,
     CredentialsError,
 )
-from agenkit_trader.execution.venue import ClockSkewError, Order, VenueError
+from agenkit_trader.execution.venue import (
+    ClockSkewError,
+    Order,
+    OrderNotFilledError,
+    OrderStatus,
+    OrderStatusUnknownError,
+    VenueError,
+)
 from agenkit_trader.killswitch import KillSwitch
 from agenkit_trader.log import DecisionLog
 
@@ -196,8 +203,90 @@ def test_unfilled_market_order_raises(keys: None) -> None:
         "updateTime": LOCAL_MS,
     }
     v = venue(s)
-    with pytest.raises(VenueError, match="EXPIRED"):
+    with pytest.raises(OrderNotFilledError, match="EXPIRED"):
         v.place_order(Order("BTCUSDT", "buy", 0.012, 5e4, 4.9e4, "t", "x", False))
+
+
+def test_new_status_with_zero_executed_is_unknown_not_unfilled(keys: None) -> None:
+    s = Server()
+    s.routes[("POST", "/fapi/v1/order")] = lambda r: {
+        "status": "NEW",
+        "executedQty": "0",
+        "avgPrice": "0",
+        "updateTime": LOCAL_MS,
+    }
+    v = venue(s)
+    with pytest.raises(OrderStatusUnknownError) as ei:
+        v.place_order(Order("BTCUSDT", "buy", 0.012, 5e4, 4.9e4, "t", "x", False))
+    assert not isinstance(ei.value, OrderNotFilledError)
+
+
+def test_get_order_by_client_id(keys: None) -> None:
+    s = Server()
+
+    def lookup(r: httpx.Request) -> Any:
+        if query(r)["origClientOrderId"] == "gone":
+            return httpx.Response(
+                400, json={"code": -2013, "msg": "Order does not exist."}
+            )
+        return {
+            "clientOrderId": "akx",
+            "status": "FILLED",
+            "executedQty": "0.012",
+            "avgPrice": "50000.5",
+        }
+
+    s.routes[("GET", "/fapi/v1/order")] = lookup
+    v = venue(s)
+    st = v.get_order("BTCUSDT", "akx")
+    q = assert_signed(s.last("/fapi/v1/order"))
+    assert q["symbol"] == "BTCUSDT" and q["origClientOrderId"] == "akx"
+    assert st == OrderStatus("akx", "FILLED", 0.012, 50000.5)
+    assert v.get_order("BTCUSDT", "gone") is None
+
+
+def test_get_order_other_errors_propagate(keys: None) -> None:
+    s = Server()
+    s.routes[("GET", "/fapi/v1/order")] = lambda r: httpx.Response(
+        503, json={"code": -1007, "msg": "Timeout"}
+    )
+    with pytest.raises(BinanceAPIError):
+        venue(s).get_order("BTCUSDT", "akx")
+
+
+def test_cancel_stop_by_client_id(keys: None) -> None:
+    s = Server()
+    s.routes[("DELETE", "/fapi/v1/algoOrder")] = lambda r: {"code": "200"}
+    venue(s).cancel_stop("BTCUSDT", "aks")
+    q = assert_signed(s.last("/fapi/v1/algoOrder"))
+    assert q["symbol"] == "BTCUSDT" and q["clientAlgoId"] == "aks"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://fapi.binance.com",
+        "http://testnet.binancefuture.com",
+        "https://testnet.binancefuture.com.evil.example",
+        "https://testnet.binancefuture.com:8443",
+        "https://user@testnet.binancefuture.com",
+        "https://testnet.binancefuture.com/fapi",
+        "https://mock.test",
+    ],
+)
+def test_base_url_must_be_the_testnet_host(url: str) -> None:
+    with pytest.raises(ValueError, match="testnet"):
+        BinanceTestnetVenue(base_url=url, transport=httpx.MockTransport(Server()))
+
+
+def test_test_host_only_via_explicit_argument() -> None:
+    v = BinanceTestnetVenue(
+        base_url="https://mock.test",
+        transport=httpx.MockTransport(Server()),
+        _test_host="mock.test",
+    )
+    assert v.base_url == "https://mock.test"
+    BinanceTestnetVenue(base_url="https://testnet.binancefuture.com/")
 
 
 def test_place_stop_uses_algo_conditional_stop_market(keys: None) -> None:

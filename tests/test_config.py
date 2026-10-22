@@ -171,6 +171,7 @@ def test_runtime_yaml_values() -> None:
         ("atr_window", 0),
         ("atr_window", 2.5),
         ("bars_limit", 0),
+        ("bars_limit", 1500),  # +1 forming bar would exceed Binance's 1500
         ("bars_limit", 1501),
         ("poll_interval_s", 0),
         ("recv_window_ms", 0),

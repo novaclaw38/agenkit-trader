@@ -24,6 +24,16 @@ class ClockSkewError(VenueError):
     """Local clock differs from the venue's by more than MAX_CLOCK_SKEW_MS."""
 
 
+class OrderNotFilledError(VenueError):
+    """The venue DEFINITELY did not fill the order (terminal status, nothing
+    executed). Any other failure of ``place_order`` means "unknown"."""
+
+
+class OrderStatusUnknownError(VenueError):
+    """The order was accepted but its outcome is not known yet (e.g. status
+    NEW with nothing executed); it may still fill."""
+
+
 @dataclass(frozen=True)
 class Position:
     symbol: str
@@ -51,6 +61,14 @@ class Order:
     client_id: str = ""
     # Exchange-enforced: the order may only reduce an existing position.
     reduce_only: bool = False
+
+
+@dataclass(frozen=True)
+class OrderStatus:
+    client_id: str
+    status: str  # venue status, e.g. "NEW", "FILLED", "EXPIRED"
+    executed_qty: float
+    avg_price: float
 
 
 @dataclass(frozen=True)
@@ -109,6 +127,14 @@ class Venue(Protocol):
     def place_stop(self, order: Order) -> str:
         """Exchange-side reduce-only STOP_MARKET at ``order.stop_price`` for
         ``order.qty``; returns the venue's id for it."""
+        ...
+
+    def get_order(self, symbol: str, client_id: str) -> OrderStatus | None:
+        """Look an order up by its client id; None if the venue has none."""
+        ...
+
+    def cancel_stop(self, symbol: str, client_id: str) -> None:
+        """Cancel one protective stop by its client id."""
         ...
 
     def cancel_open_orders(self, symbol: str) -> None: ...

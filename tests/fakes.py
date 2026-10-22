@@ -12,6 +12,7 @@ from agenkit_trader.execution.venue import (
     Fill,
     OpenOrder,
     Order,
+    OrderStatus,
     Position,
     SymbolRules,
     VenueError,
@@ -49,6 +50,9 @@ class FakeVenue:
     funding: dict[str, pd.Series] = field(default_factory=dict)
     supports_funding: bool = True
     account_halted: bool = False
+    # Fraction of each market order's qty that fills (partial-fill injection).
+    fill_fraction: float = 1.0
+    order_status: dict[str, OrderStatus] = field(default_factory=dict)
 
     def _maybe_fail(self) -> None:
         if self.fail_next > 0:
@@ -81,7 +85,12 @@ class FakeVenue:
     def place_order(self, order: Order) -> Fill:
         self._maybe_fail()
         self.orders.append(order)
-        signed = order.qty if order.side == "buy" else -order.qty
+        qty = (
+            order.qty
+            if self.fill_fraction == 1.0
+            else round(order.qty * self.fill_fraction, 9)
+        )
+        signed = qty if order.side == "buy" else -qty
         old = self.positions.get(order.symbol)
         new_qty = (old.qty if old else 0.0) + signed
         if abs(new_qty) < 1e-12:
@@ -90,10 +99,14 @@ class FakeVenue:
             self.positions[order.symbol] = Position(
                 order.symbol, new_qty, order.price_ref
             )
+        if order.client_id:
+            self.order_status[order.client_id] = OrderStatus(
+                order.client_id, "FILLED", qty, order.price_ref
+            )
         return Fill(
             symbol=order.symbol,
             side=order.side,
-            qty=order.qty,
+            qty=qty,
             price=order.price_ref,
             fee=0.0,
             time=self.now,
@@ -137,6 +150,19 @@ class FakeVenue:
         self.stops.append(order)
         self.stops_placed.append(order)
         return order.client_id
+
+    def get_order(self, symbol: str, client_id: str) -> OrderStatus | None:
+        self._maybe_fail()
+        return self.order_status.get(client_id)
+
+    def cancel_stop(self, symbol: str, client_id: str) -> None:
+        self._maybe_fail()
+        self.cancel_calls.append(f"{symbol}:{client_id}")
+        self.stops = [
+            o
+            for o in self.stops
+            if not (o.symbol == symbol and o.client_id == client_id)
+        ]
 
     def cancel_open_orders(self, symbol: str) -> None:
         self._maybe_fail()

@@ -7,51 +7,68 @@ Invariants (each is tested in ``tests/runtime/test_loop.py``):
   allowed. Only the kill switch (``venue.flatten_all``) bypasses the gate.
 * Nothing is placed while the kill switch is halted. The ``AccountState``
   handed to the gate has ``halted = kill.halted or venue_state.halted``.
-* Only CLOSED bars are used (a bar whose ``open + interval > now`` is the
-  forming bar and is dropped); one decision per bar per strategy, recorded in
-  the state file before acting, so processing a bar twice (also across a
-  restart) places nothing new. Client order ids are derived from
-  strategy/symbol/bar time/kind.
+* Only CLOSED bars are used. "Closed" is judged on the VENUE clock: a bar is
+  closed when ``open + interval + CLOSE_GRACE <= min(server time, local
+  time)``, so clock skew can never make the forming bar look closed. One
+  decision per bar per strategy, recorded in the state file before any order
+  is submitted, so processing a bar twice (also across a restart) places
+  nothing new. Client order ids are derived from strategy/symbol/bar/kind.
 * Entries happen only on a signal transition at the latest closed bar
-  (previous bar's target != this bar's target) and only when the current
-  regime (``agenkit_trader.regime.label_regimes`` with the gate's
-  ``regime_window``) is in the deployment's ``allowed_regimes``. Exits (target
-  differs from the held side) are always allowed. Entry-on-transition means a
-  restart never enters mid-signal and a disaster-stop exit is not re-entered
-  until the strategy signals afresh.
+  (previous bar's target != this bar's target): a restart never enters
+  mid-signal and a disaster-stop exit is not re-entered until a fresh signal.
+* Regimes (v1, fail closed): runtime regime labels cannot yet reproduce the
+  research labels exactly (research used an expanding median over years of
+  history; the runtime sees at most 1499 bars), so a deployment whose
+  ``allowed_regimes`` is a strict subset of ``REGIMES`` is refused at start.
+  Unrestricted deployments need no label.
 * Protective stop: ``close -/+ stop_atr_mult * ATR(atr_window)`` (rounded to
-  the tick toward the entry, so the loss at the stop never exceeds the
-  sized budget); size via ``size_position`` (floored to lot); after the fill
-  a reduce-only STOP_MARKET is placed. If that stop is rejected or fails, the
-  kill switch flattens (an unprotected position is not kept).
+  the tick toward the entry, so the loss at the stop never exceeds the sized
+  budget); size via ``size_position`` (floored to lot); after the fill a
+  reduce-only STOP_MARKET is placed.
+* Stop coverage, EVERY cycle, for every owned position: the reduce-only
+  stops on the closing side must cover ``abs(qty)``. If not, a replacement
+  stop for the full position is placed (through the gate) BEFORE the old,
+  insufficient stops are cancelled; if that fails the kill switch flattens.
+  A flat symbol with open orders has them cancelled (orphans). This also
+  repairs the outcome of an ambiguous order (filled on the exchange but the
+  response was lost) and of a partial exit.
+* Ambiguous orders: ``OrderNotFilledError`` is the only failure treated as
+  "not filled". Any other ``place_order`` failure (timeout, 5xx, status NEW)
+  is "unknown": the order is looked up by its client id, the position is
+  re-read, and the per-cycle coverage check protects whatever exists.
+* Exits: after an exit (whatever its outcome) the position is re-read. Only
+  when flat are the symbol's stops cancelled; a residual keeps its stop.
 * Gate valuation: ``Position.entry_price`` is used by the gate only to value
   OTHER symbols' notional for the leverage cap (and checked > 0). The runtime
-  therefore passes positions re-valued at the venue's current MARK price, so
-  the leverage check uses current, not historical, exposure.
+  passes positions re-valued at the venue's current MARK price.
+* Gate data time: entries/exits use the decided bar's close time as
+  ``last_bar_time``; a protective stop placed by the coverage check uses the
+  time its inputs (account, mark, bars) were just read, because it only
+  reduces exposure and must not be blocked mid-bar.
 * Paper equity = ``risk.start_equity + (venue equity - venue equity at first
-  start)``: the testnet wallet size is irrelevant; the configured paper
-  account is what is risked. Day-start and peak paper equity are tracked in
-  the state file (UTC days), so drawdown survives restarts. Daily loss or
-  drawdown at/over the limit trips the kill switch.
-* Data staleness: if the newest closed bar closed more than
-  ``interval + stale_after_s`` ago, the feed is stale and the kill switch
-  flattens. Clock skew > MAX_CLOCK_SKEW_MS at start or in any cycle trips the
-  kill switch. Every venue exception is counted with
-  ``KillSwitch.record_api_error`` (5 in the window halt); a gate rejection is
-  logged and the loop continues; an unexpected internal exception trips the
-  kill switch.
+  start)``. Baseline, peak and UTC day-start equity live in the state file;
+  daily loss or drawdown at/over the limit trips the kill switch.
+* Staleness: newest closed bar older than ``interval + stale_after_s`` ->
+  kill switch. Clock skew > MAX_CLOCK_SKEW_MS (measured at the request
+  midpoint; a venue with ``sync_time`` is re-synced each cycle) -> kill
+  switch. Every venue exception is counted with ``record_api_error``; gate
+  rejections are logged and the loop continues; unexpected internal
+  exceptions trip the kill switch.
 * Restart reconciliation (``start``): positions and open orders are read
-  BEFORE trading. A position/order on a symbol no deployed strategy owns is
-  logged and, by default, startup is refused (the user decides); with
-  ``flatten_unowned_on_start: true`` the kill switch flattens instead. An
-  owned position is adopted (logged) and gets a protective stop if it has
-  none. One deployed strategy per symbol (one-way mode nets positions).
-* A halt is persisted in the state file; a new process refuses to start until
-  the user runs ``agenkit reset-halt``.
+  BEFORE trading. Unowned position/order -> logged, refuse (default) or kill
+  switch flatten (``flatten_unowned_on_start``). Owned positions are adopted
+  and stop coverage is enforced. One deployed strategy per symbol.
+* State: a MISSING state file refuses start unless ``init_state`` is given
+  (logged ``state/init``); a corrupt one always refuses. A halt is written to
+  the state file and to the decision log (``halt``; the kill switch also logs
+  ``kill_switch``); start refuses while the decision log's latest halt has no
+  later ``runtime/halt_reset`` record, so deleting the state file does not
+  bypass a halt.
 """
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
@@ -64,7 +81,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, TypeVar
 
-import numpy as np
 import pandas as pd
 
 from agenkit_trader.config import RuntimeConfig
@@ -80,13 +96,14 @@ from agenkit_trader.execution.venue import (
     ClockSkewError,
     Fill,
     Order,
+    OrderNotFilledError,
     Position,
     SymbolRules,
     Venue,
 )
 from agenkit_trader.killswitch import KillSwitch
 from agenkit_trader.log import DecisionLog
-from agenkit_trader.regime import REGIMES, label_regimes
+from agenkit_trader.regime import REGIMES
 from agenkit_trader.risk.gate import RiskGate
 from agenkit_trader.risk.sizing import floor_to_lot, size_position
 from agenkit_trader.strategies.base import Strategy
@@ -94,6 +111,8 @@ from agenkit_trader.strategies.funding_reversion import FUNDING_AVAILABLE_LAG
 
 FUNDING_LIMIT = 1000  # Binance fundingRate max per request
 SUPPORTED_AUX = ("funding",)
+CLOSE_GRACE = pd.Timedelta(seconds=2)
+HALT_KINDS = ("kill_switch", "halt")
 _T = TypeVar("_T")
 
 
@@ -178,7 +197,7 @@ def validate_deployments(
     deployed: Iterable[Deployment], strategies: Mapping[str, Strategy]
 ) -> None:
     """Refuse unless every deployment names a known strategy with params from
-    its grid, a valid interval and known regimes, one per symbol."""
+    its grid, a valid interval, all regimes allowed, one per symbol."""
     seen: set[str] = set()
     for d in deployed:
         s = strategies.get(d.name)
@@ -197,6 +216,15 @@ def validate_deployments(
         bad = [r for r in d.allowed_regimes if r not in REGIMES]
         if bad:
             raise StartupRefused(f"{d.name}: unknown regime(s) {bad}")
+        if set(d.allowed_regimes) != set(REGIMES):
+            raise StartupRefused(
+                f"{d.name} on {d.symbol}: regime-restricted deployment "
+                f"(allowed_regimes={d.allowed_regimes}) is refused in v1: the "
+                "runtime cannot yet reproduce the research regime labels exactly "
+                "(research used an expanding median over the full archive "
+                "history, the runtime sees at most 1499 bars), so the stay-out "
+                "rule could not be honoured reliably"
+            )
         unknown_aux = [
             a for a in getattr(s, "aux_required", ()) if a not in SUPPORTED_AUX
         ]
@@ -216,23 +244,34 @@ def client_order_id(name: str, symbol: str, bar_open: pd.Timestamp, kind: str) -
     return "ak" + hashlib.sha256(raw.encode()).hexdigest()[:30]
 
 
-def check_clock_skew(venue: Venue, now: datetime) -> None:
-    """Raise ``ClockSkewError`` if venue time and ``now`` differ by more than
-    MAX_CLOCK_SKEW_MS."""
-    skew_ms = (venue.server_time() - now).total_seconds() * 1000.0
+def check_clock_skew(venue: Venue, clock: Callable[[], datetime]) -> datetime:
+    """Re-sync the venue offset (if it has ``sync_time``), then compare the
+    venue time with the MIDPOINT of the local request window. Raises
+    ``ClockSkewError`` above MAX_CLOCK_SKEW_MS; returns the venue time."""
+    sync = getattr(venue, "sync_time", None)
+    if callable(sync):
+        sync()
+    t0 = clock()
+    server = venue.server_time()
+    t1 = clock()
+    mid = t0 + (t1 - t0) / 2
+    skew_ms = (server - mid).total_seconds() * 1000.0
     if not abs(skew_ms) <= MAX_CLOCK_SKEW_MS:
         raise ClockSkewError(
             f"clock skew {skew_ms:.0f} ms vs venue exceeds {MAX_CLOCK_SKEW_MS} ms"
         )
+    return server
 
 
 def closed_bars(bars: pd.DataFrame, step: pd.Timedelta, now: datetime) -> pd.DataFrame:
     """Drop the forming bar (and anything later): keep bars with
-    ``open + step <= now``."""
+    ``open + step + CLOSE_GRACE <= now`` (``now`` = venue-time based)."""
     if len(bars) == 0:
         return bars
-    keep = (bars.index + step) <= pd.Timestamp(now)
-    return bars.loc[keep]
+    idx = pd.DatetimeIndex(bars.index)
+    keep = (idx + (step + CLOSE_GRACE)) <= pd.Timestamp(now)
+    out: pd.DataFrame = bars.loc[keep]
+    return out
 
 
 def atr(bars: pd.DataFrame, window: int) -> float:
@@ -275,9 +314,7 @@ class _PaperState:
     halted: str | None = None
 
     @classmethod
-    def load(cls, path: Path | None) -> _PaperState:
-        if path is None or not Path(path).exists():
-            return cls()
+    def load(cls, path: Path) -> _PaperState:
         try:
             data = json.loads(Path(path).read_text(encoding="utf-8"))
             return cls(**data)
@@ -305,14 +342,76 @@ class _PaperState:
             raise
 
 
+def last_unreset_halt(log_path: Path) -> str | None:
+    """Timestamp of the decision log's latest halt record (``kill_switch`` or
+    ``halt``) that has no later ``runtime/halt_reset`` record, else None.
+    An unreadable log refuses (fail closed)."""
+    path = Path(log_path)
+    if not path.exists():
+        return None
+    halt: str | None = None
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            if rec.get("kind") in HALT_KINDS:
+                halt = str(rec.get("ts"))
+            elif rec.get("kind") == "runtime" and rec.get("result") == "halt_reset":
+                halt = None
+    except (OSError, ValueError, AttributeError) as exc:
+        raise StartupRefused(
+            f"decision log {path} is unreadable ({exc}); cannot verify that no "
+            "halt is outstanding"
+        ) from exc
+    return halt
+
+
+def check_state_ready(
+    state_path: Path | None, log_path: Path, init_state: bool
+) -> None:
+    """Refuse on an outstanding logged halt (even with ``init_state``), on a
+    MISSING state file without ``init_state``, and on a corrupt one."""
+    halt = last_unreset_halt(log_path)
+    if halt is not None:
+        raise StartupRefused(
+            f"the decision log {log_path} records a halt at {halt} with no later "
+            "reset; inspect it, then run `agenkit reset-halt`"
+        )
+    if state_path is None:
+        return
+    if not Path(state_path).exists():
+        if not init_state:
+            raise StartupRefused(
+                f"state file {state_path} does not exist; it holds the paper "
+                "account's P&L baseline, peak/day-start equity and any halt. If "
+                "this really is a NEW paper account, pass --init-state"
+            )
+        return
+    st = _PaperState.load(Path(state_path))
+    if st.halted is not None:
+        raise StartupRefused(
+            f"a previous run halted (at {st.halted}); inspect the decision log, "
+            "then run `agenkit reset-halt`"
+        )
+
+
 def reset_halt(state_path: Path, log: DecisionLog) -> bool:
-    """Clear a persisted halt (the CLI asks for the confirmation phrase)."""
-    st = _PaperState.load(state_path)
-    was = st.halted
-    st.halted = None
-    st.save(state_path)
-    log.write("runtime", {"state": str(state_path)}, {"was": was}, "halt_reset")
-    return was is not None
+    """Clear a persisted halt in the state file (if any) and log the reset
+    (the CLI asks for the confirmation phrase first)."""
+    was_logged = last_unreset_halt(log.path)
+    was_state: str | None = None
+    if Path(state_path).exists():
+        st = _PaperState.load(Path(state_path))
+        was_state, st.halted = st.halted, None
+        st.save(state_path)
+    log.write(
+        "runtime",
+        {"state": str(state_path)},
+        {"was_state": was_state, "was_logged": was_logged},
+        "halt_reset",
+    )
+    return was_state is not None or was_logged is not None
 
 
 class Runtime:
@@ -327,8 +426,8 @@ class Runtime:
         clock: Callable[[], datetime],
         *,
         runtime_cfg: RuntimeConfig,
-        regime_window: int,
         state_path: Path | None = None,
+        init_state: bool = False,
     ) -> None:
         if isinstance(strategies, Mapping):
             self.strategies = dict(strategies)
@@ -342,10 +441,18 @@ class Runtime:
         self.clock = clock
         self.cfg = runtime_cfg
         self.risk = gate.cfg
-        self.regime_window = regime_window
         self.state_path = state_path
-        self._st = _PaperState.load(state_path)
+        self.init_state = init_state
+        self._st = (
+            _PaperState.load(Path(state_path))
+            if state_path is not None and Path(state_path).exists()
+            else _PaperState()
+        )
+        # Nothing is written to the state file until start() has passed its
+        # state checks (a refused start never creates or alters it).
+        self._may_write = False
         self._started = False
+        self._data_now: datetime | None = None
 
     # ------------------------------------------------------------ helpers
 
@@ -371,7 +478,9 @@ class Runtime:
     def _save(self) -> None:
         if self.kill.halted and self._st.halted is None:
             self._st.halted = self.clock().isoformat()
-        self._st.save(self.state_path)
+            self.log.write("halt", {"state": str(self.state_path)}, {}, "halted")
+        if self._may_write:
+            self._st.save(self.state_path)
 
     def _paper_equity(self, venue_equity: float, now: datetime) -> float:
         st = self._st
@@ -408,7 +517,9 @@ class Runtime:
         return {"kind": kind, "order": asdict(order), "state": asdict(state)}
 
     def submit(self, order: Order, state: AccountState, kind: str) -> Fill | None:
-        """Gate-check then place a market order. None if refused/rejected/failed."""
+        """Gate-check then place a market order. Returns the fill, or None if
+        refused, rejected, definitely not filled, or of unknown outcome (the
+        per-cycle stop coverage check then protects whatever exists)."""
         now = self.clock()
         inputs = self._order_inputs(order, state, kind)
         if self.kill.halted:
@@ -423,11 +534,37 @@ class Runtime:
             return None
         try:
             fill = self._call(self.venue.place_order, order)
-        except _VenueFailed:
-            self.log.write("order", inputs, asdict(decision), "error")
+        except _VenueFailed as exc:
+            if isinstance(exc.__cause__, OrderNotFilledError):
+                self.log.write("order", inputs, asdict(decision), "not_filled")
+                return None
+            resolved = self._resolve(order)
+            if resolved is not None:
+                self.log.write(
+                    "order", inputs, {"fill": asdict(resolved)}, "filled_after_error"
+                )
+                return resolved
+            self.log.write("order", inputs, asdict(decision), "unknown")
             return None
         self.log.write("order", inputs, {"fill": asdict(fill)}, "filled")
         return fill
+
+    def _resolve(self, order: Order) -> Fill | None:
+        """Look an order of unknown outcome up by its client id."""
+        try:
+            st = self._call(self.venue.get_order, order.symbol, order.client_id)
+        except _VenueFailed:
+            return None
+        if st is None or not st.executed_qty > 0:
+            return None
+        return Fill(
+            symbol=order.symbol,
+            side=order.side,
+            qty=st.executed_qty,
+            price=st.avg_price if st.avg_price > 0 else order.price_ref,
+            fee=0.0,
+            time=self.clock(),
+        )
 
     def _protect(
         self,
@@ -437,7 +574,7 @@ class Runtime:
         price_ref: float,
         stop: float,
         bar_open: pd.Timestamp,
-        bar_close: datetime,
+        data_time: datetime,
         rules: SymbolRules,
         kind: str = "stop",
     ) -> bool:
@@ -454,7 +591,7 @@ class Runtime:
             reduce_only=True,
         )
         try:
-            state = self.build_state(self._call(self.venue.get_account), bar_close)
+            state = self.build_state(self._call(self.venue.get_account), data_time)
         except _VenueFailed:
             self.kill.trigger("disaster_stop_failed")
             return False
@@ -476,12 +613,13 @@ class Runtime:
         self.log.write("stop", inputs, {"venue_id": ref}, "placed")
         return True
 
-    def _closed(self, dep: Deployment, now: datetime) -> pd.DataFrame:
+    def _closed(self, dep: Deployment) -> pd.DataFrame:
         step = interval_to_timedelta(dep.interval)
         raw = self._call(
             self.venue.get_bars, dep.symbol, dep.interval, self.cfg.bars_limit + 1
         )
-        return closed_bars(raw, step, now)
+        assert self._data_now is not None
+        return closed_bars(raw, step, self._data_now)
 
     def _aux(
         self, dep: Deployment, strat: Strategy, bars: pd.DataFrame
@@ -492,11 +630,101 @@ class Runtime:
             aux["funding"] = align_asof(bars, f, FUNDING_AVAILABLE_LAG)
         return aux
 
+    def _clock_check(self, now: datetime) -> bool:
+        """Skew check + venue-time snapshot for this cycle. False (and the kill
+        switch or the error counter engaged) if it fails."""
+        try:
+            server = check_clock_skew(self.venue, self.clock)
+        except ClockSkewError as exc:
+            self.log.write("clock_skew", {"now": now}, {"error": str(exc)}, "halt")
+            self.kill.trigger("clock_skew")
+            return False
+        except Exception as exc:
+            self.log.write(
+                "venue_error", {"call": "server_time"}, {"error": repr(exc)}, "error"
+            )
+            self.kill.record_api_error(now)
+            return False
+        self._data_now = min(server, now)
+        return True
+
+    # ------------------------------------------------------------ protection
+
+    def _ensure_protected(self, d: Deployment, now: datetime) -> bool:
+        """Every owned position must be covered by reduce-only stops on its
+        closing side; repair (place first, then cancel the old ones) or trip
+        the kill switch. Cancels orphan orders on a flat symbol."""
+        acct = self._call(self.venue.get_account)
+        pos = acct.positions.get(d.symbol)
+        orders = [
+            o for o in self._call(self.venue.get_open_orders) if o.symbol == d.symbol
+        ]
+        if pos is None or pos.qty == 0:
+            if orders:
+                self.log.write(
+                    "orphan_orders",
+                    {"orders": [asdict(o) for o in orders]},
+                    {},
+                    "cancel",
+                )
+                self._call(self.venue.cancel_open_orders, d.symbol)
+            return True
+        close_side = "sell" if pos.qty > 0 else "buy"
+        stops = [
+            o
+            for o in orders
+            if o.reduce_only and o.stop_price is not None and o.side == close_side
+        ]
+        covered = sum(o.qty for o in stops)
+        need = abs(pos.qty)
+        if covered >= need * (1 - 1e-9):
+            return True
+        self.log.write(
+            "stop_coverage",
+            {"position": asdict(pos), "stops": [asdict(o) for o in stops]},
+            {"covered": covered, "needed": need},
+            "repair",
+        )
+        if not self._restore_stop(d, pos, now):
+            return False
+        for o in stops:  # the new full-size stop is in place: drop the old ones
+            # a failure is logged and counted; a leftover reduce-only stop is
+            # harmless
+            with contextlib.suppress(_VenueFailed):
+                self._call(self.venue.cancel_stop, d.symbol, o.client_id)
+        return True
+
+    def _restore_stop(self, d: Deployment, pos: Position, now: datetime) -> bool:
+        try:
+            bars = self._closed(d)
+            rules = self._call(self.venue.symbol_rules, d.symbol)
+        except _VenueFailed:
+            self.kill.trigger("unprotected_position")
+            return False
+        a = atr(bars, self.cfg.atr_window) if len(bars) else float("nan")
+        side = _sign(pos.qty)
+        if not (math.isfinite(a) and a > 0):
+            self.kill.trigger("unprotected_position")
+            return False
+        close = float(bars["close"].iloc[-1])
+        stop = protective_stop(close, side, self.cfg.stop_atr_mult * a, rules.tick)
+        return self._protect(
+            d,
+            side,
+            abs(pos.qty),
+            close,
+            stop,
+            bars.index[-1],
+            self.clock(),  # inputs were read just now (see module docs)
+            rules,
+            kind=f"restop|{pd.Timestamp(now).isoformat()}",
+        )
+
     # ------------------------------------------------------------ start
 
     def start(self) -> None:
-        """Validate, check the clock, reconcile with the venue. Raises
-        ``StartupRefused`` (after logging) instead of trading."""
+        """Validate, check state/halts and the clock, reconcile with the venue.
+        Raises ``StartupRefused`` (after logging) instead of trading."""
         now = self.clock()
         try:
             self._start(now)
@@ -515,21 +743,16 @@ class Runtime:
     def _start(self, now: datetime) -> None:
         if self.kill.halted:
             raise StartupRefused("kill switch is halted; manual reset required")
-        if self._st.halted is not None:
-            raise StartupRefused(
-                f"a previous run halted (at {self._st.halted}); inspect the "
-                "decision log, then run `agenkit reset-halt`"
-            )
+        check_state_ready(self.state_path, self.log.path, self.init_state)
         validate_deployments(self.deployed, self.strategies)
-        try:
-            check_clock_skew(self.venue, now)
-        except ClockSkewError as exc:
-            self.log.write("clock_skew", {"now": now}, {"error": str(exc)}, "halt")
-            self.kill.trigger("clock_skew")
-            raise StartupRefused(f"clock skew: {exc}") from exc
-        except Exception as exc:
-            self.kill.record_api_error(now)
-            raise StartupRefused(f"venue unreachable at start: {exc!r}") from exc
+        if self.state_path is not None and not Path(self.state_path).exists():
+            self.log.write("state", {"state": str(self.state_path)}, {}, "init")
+        self._may_write = True
+        self._save()
+        if not self._clock_check(now):
+            if self.kill.halted:
+                raise StartupRefused("clock skew vs venue; kill switch halted")
+            raise StartupRefused("venue unreachable at start (server time)")
         for d in self.deployed:
             if "funding" in getattr(self.strategies[d.name], "aux_required", ()):
                 try:
@@ -579,49 +802,27 @@ class Runtime:
             )
         self._paper_equity(acct.equity, now)
         for sym, pos in acct.positions.items():
-            d = owned[sym]
-            stops = [
-                o
-                for o in orders
-                if o.symbol == sym and o.reduce_only and o.stop_price is not None
-            ]
             self.log.write(
                 "adopted_position",
-                {"position": asdict(pos), "stops": [asdict(o) for o in stops]},
-                {"owner": d.key},
+                {
+                    "position": asdict(pos),
+                    "orders": [asdict(o) for o in orders if o.symbol == sym],
+                },
+                {"owner": owned[sym].key},
                 "adopted",
             )
-            if not stops and not self._restore_stop(d, pos, now):
+        for d in self.deployed:
+            try:
+                ok = self._ensure_protected(d, now)
+            except _VenueFailed as exc:
                 raise StartupRefused(
-                    f"could not place a protective stop for the open {sym} position"
+                    f"cannot verify stop coverage for {d.symbol}"
+                ) from exc
+            if not ok:
+                raise StartupRefused(
+                    f"could not place a protective stop for the open {d.symbol} "
+                    "position; kill switch engaged"
                 )
-
-    def _restore_stop(self, d: Deployment, pos: Position, now: datetime) -> bool:
-        try:
-            bars = self._closed(d, now)
-            rules = self._call(self.venue.symbol_rules, d.symbol)
-        except _VenueFailed:
-            self.kill.trigger("unprotected_position")
-            return False
-        a = atr(bars, self.cfg.atr_window) if len(bars) else float("nan")
-        side = _sign(pos.qty)
-        if not (math.isfinite(a) and a > 0):
-            self.kill.trigger("unprotected_position")
-            return False
-        close = float(bars["close"].iloc[-1])
-        stop = protective_stop(close, side, self.cfg.stop_atr_mult * a, rules.tick)
-        step = interval_to_timedelta(d.interval)
-        return self._protect(
-            d,
-            side,
-            abs(pos.qty),
-            close,
-            stop,
-            bars.index[-1],
-            (bars.index[-1] + step).to_pydatetime(),
-            rules,
-            kind="restop",
-        )
 
     # ------------------------------------------------------------ cycle
 
@@ -638,17 +839,7 @@ class Runtime:
             self._save()
 
     def _cycle(self, now: datetime) -> None:
-        try:
-            check_clock_skew(self.venue, now)
-        except ClockSkewError as exc:
-            self.log.write("clock_skew", {"now": now}, {"error": str(exc)}, "halt")
-            self.kill.trigger("clock_skew")
-            return
-        except Exception as exc:
-            self.log.write(
-                "venue_error", {"call": "server_time"}, {"error": repr(exc)}, "error"
-            )
-            self.kill.record_api_error(now)
+        if not self._clock_check(now):
             return
         try:
             acct = self._call(self.venue.get_account)
@@ -666,23 +857,27 @@ class Runtime:
             self.kill.trigger("drawdown")
             return
         for d in self.deployed:
-            if self.kill.halted:
-                return
-            try:
-                self._step(d, now)
-            except _VenueFailed:
-                continue
-            except Exception as exc:
-                self.log.write(
-                    "runtime_error", {"deployment": d.key}, {"error": repr(exc)}, "halt"
-                )
-                self.kill.trigger("internal_error")
-                return
+            for action in (self._step, self._ensure_protected):
+                if self.kill.halted:
+                    return
+                try:
+                    action(d, now)
+                except _VenueFailed:
+                    continue
+                except Exception as exc:
+                    self.log.write(
+                        "runtime_error",
+                        {"deployment": d.key},
+                        {"error": repr(exc)},
+                        "halt",
+                    )
+                    self.kill.trigger("internal_error")
+                    return
 
     def _step(self, d: Deployment, now: datetime) -> None:
         strat = self.strategies[d.name]
         step = interval_to_timedelta(d.interval)
-        bars = self._closed(d, now)
+        bars = self._closed(d)
         if len(bars) == 0:
             self.log.write("stale_data", {"deployment": d.key}, {"bars": 0}, "halt")
             self.kill.trigger("stale_data")
@@ -714,8 +909,6 @@ class Runtime:
         sig = strat.signal(bars, d.params, aux)
         target = _sign(sig.iloc[-1])
         prev = _sign(sig.iloc[-2]) if len(sig) > 1 else 0.0
-        lab = label_regimes(bars, self.regime_window).iloc[-1]
-        regime = None if np.isnan(lab) else REGIMES[int(lab)]
         state = self.build_state(self._call(self.venue.get_account), last_close)
         # One decision per bar, recorded BEFORE any order is submitted (a
         # failed read above leaves the bar retriable; nothing was placed).
@@ -731,7 +924,6 @@ class Runtime:
                 "bar_open": last_open,
                 "bar_close": last_close,
                 "close": close,
-                "regime": regime,
                 "position": cur,
             },
             {"target": target, "prev_target": prev},
@@ -749,39 +941,18 @@ class Runtime:
                 client_id=client_order_id(d.name, d.symbol, last_open, "exit"),
                 reduce_only=True,
             )
-            fill = self.submit(exit_order, state, "exit")
-            if fill is None:
+            self.submit(exit_order, state, "exit")
+            # Whatever the outcome, re-read before touching the stops.
+            after = self._call(self.venue.get_account).positions.get(d.symbol)
+            if after is not None and after.qty != 0:
+                # Unfilled, unknown or partial: the existing stops stay; the
+                # coverage check after this step verifies the residual.
                 return
             self._call(self.venue.cancel_open_orders, d.symbol)
-            if fill.qty < abs(cur):
-                return  # partial exit: no new entry on top
             held = 0.0
-        elif held == 0:
-            orphans = [
-                o
-                for o in self._call(self.venue.get_open_orders)
-                if o.symbol == d.symbol
-            ]
-            if orphans:  # e.g. the stop's sibling after an exchange-side stop-out
-                self.log.write(
-                    "orphan_orders",
-                    {"orders": [asdict(o) for o in orphans]},
-                    {},
-                    "cancel",
-                )
-                self._call(self.venue.cancel_open_orders, d.symbol)
         if target == 0 or held != 0 or target == prev:
             return
-        entry_inputs = {
-            "deployment": d.key,
-            "bar_open": last_open,
-            "target": target,
-            "regime": regime,
-            "allowed_regimes": d.allowed_regimes,
-        }
-        if regime not in d.allowed_regimes:
-            self.log.write("entry", entry_inputs, {}, "regime_blocked")
-            return
+        entry_inputs = {"deployment": d.key, "bar_open": last_open, "target": target}
         self._enter(d, bars, target, last_open, last_close, entry_inputs)
 
     def _enter(
@@ -825,7 +996,7 @@ class Runtime:
         self.log.write("entry", sized, {"qty": qty}, "sized")
         fill = self.submit(order, state, "entry")
         if fill is None:
-            return
+            return  # unknown outcomes are protected by the coverage check
         self._protect(d, side, fill.qty, close, stop, bar_open, bar_close, rules)
 
 
@@ -839,14 +1010,14 @@ def run_loop(
     clock: Callable[[], datetime],
     *,
     runtime_cfg: RuntimeConfig,
-    regime_window: int,
     sleep: Callable[[float], None] = time.sleep,
     max_cycles: int | None = None,
     state_path: Path | None = None,
+    init_state: bool = False,
 ) -> None:
     """Reconcile, then run cycles until the kill switch halts (or
     ``max_cycles``). Refuses (returns, logged) if already halted; raises
-    ``StartupRefused`` if startup reconciliation refuses."""
+    ``StartupRefused`` if startup refuses."""
     if kill.halted:
         log.write("runtime", {}, {"reason": "kill switch halted"}, "refused_halted")
         return
@@ -859,8 +1030,8 @@ def run_loop(
         log,
         clock,
         runtime_cfg=runtime_cfg,
-        regime_window=regime_window,
         state_path=state_path,
+        init_state=init_state,
     )
     rt.start()
     cycles = 0
