@@ -14,6 +14,7 @@ from agenkit_trader.strategies.base import Strategy
 from agenkit_trader.strategies.funding_reversion import FundingReversion
 from agenkit_trader.strategies.short_reversion import ShortReversion
 from agenkit_trader.strategies.trend_breakout import TrendBreakout
+from agenkit_trader.strategies.trend_funding_filter import TrendFundingFilter
 
 
 def _bars(close: np.ndarray) -> pd.DataFrame:
@@ -42,7 +43,12 @@ def _random_aux(bars: pd.DataFrame, seed: int = 1) -> dict[str, pd.Series]:
     return {"funding": pd.Series(f, index=bars.index)}
 
 
-STRATS: list[Strategy] = [FundingReversion(), TrendBreakout(), ShortReversion()]
+STRATS: list[Strategy] = [
+    FundingReversion(),
+    TrendBreakout(),
+    ShortReversion(),
+    TrendFundingFilter(),
+]
 
 
 def _first(grid: dict[str, list[Any]]) -> dict[str, Any]:
@@ -59,7 +65,7 @@ def _all_params(s: Strategy) -> list[dict[str, Any]]:
     ]
 
 
-def test_registry_holds_all_three() -> None:
+def test_registry_holds_all_strategies() -> None:
     assert set(REGISTRY) == {s.name for s in STRATS}
     for name, s in REGISTRY.items():
         assert isinstance(s, Strategy)

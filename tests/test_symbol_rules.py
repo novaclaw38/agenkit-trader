@@ -25,6 +25,14 @@ def test_committed_rules() -> None:
     assert r == {
         "BTCUSDT": SymbolRules(tick=0.1, lot=0.0001, min_notional=50.0),
         "ETHUSDT": SymbolRules(tick=0.01, lot=0.001, min_notional=20.0),
+        "BNBUSDT": SymbolRules(tick=0.01, lot=0.01, min_notional=5.0),
+        "SOLUSDT": SymbolRules(tick=0.01, lot=0.01, min_notional=5.0),
+        "XRPUSDT": SymbolRules(tick=0.0001, lot=0.1, min_notional=5.0),
+        "DOGEUSDT": SymbolRules(tick=0.00001, lot=1.0, min_notional=5.0),
+        "ADAUSDT": SymbolRules(tick=0.0001, lot=1.0, min_notional=5.0),
+        "LINKUSDT": SymbolRules(tick=0.001, lot=0.01, min_notional=5.0),
+        "AVAXUSDT": SymbolRules(tick=0.001, lot=1.0, min_notional=5.0),
+        "LTCUSDT": SymbolRules(tick=0.01, lot=0.001, min_notional=5.0),
     }
 
 
@@ -64,5 +72,5 @@ def test_run_research_gives_each_symbol_its_rules() -> None:
     assert pols["BTCUSDT"].rules == SymbolRules(0.1, 0.0001, 50.0)
     assert pols["ETHUSDT"].rules == SymbolRules(0.01, 0.001, 20.0)
     assert pols["ETHUSDT"].risk.max_risk_per_trade == 0.01
-    with pytest.raises(SystemExit, match="SOLUSDT"):
-        mod["runtime_policies"](["SOLUSDT"])
+    with pytest.raises(SystemExit, match="SHIBUSDT"):
+        mod["runtime_policies"](["SHIBUSDT"])

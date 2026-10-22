@@ -591,6 +591,32 @@ def test_window_signals_equal_runtime_signals_short_reversion(
     )
 
 
+def test_window_signals_equal_runtime_signals_trend_funding_filter(
+    tmp_path: Path,
+) -> None:
+    """New in round 2: simulator window signals == the real runtime's, with
+    funding supplied through the runtime's own fetch/align path."""
+    from agenkit_trader.strategies import REGISTRY
+
+    strat = REGISTRY["trend_funding_filter"]
+    assert getattr(strat, "aux_required", ()) == ("funding",)
+    params = {"lookback": 42, "thr": 0.0003, "vol_cap": 1.5}
+    first = RT.bars_limit + 20
+    _assert_window_parity(tmp_path, strat, params, first, 600, True)
+    # the filter really bites in this scenario: fewer entries than plain trend
+    from agenkit_trader.backtest.runtime_policy import window_signals
+
+    raw = REGISTRY["trend_breakout"]
+    bars = _walk(0, first + 600)
+    f = _funding(bars, 0)
+    aux = _aligned(bars, f)
+    a, _ = window_signals(strat, bars, params, aux, RT.bars_limit, first, funding=f)
+    b, _ = window_signals(
+        raw, bars, {"lookback": 42, "vol_cap": 1.5}, {}, RT.bars_limit, first
+    )
+    assert (a != b).any()
+
+
 def test_funding_window_is_capped_like_the_runtime_fetch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

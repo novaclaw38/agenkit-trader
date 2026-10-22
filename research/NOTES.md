@@ -160,3 +160,17 @@ untouched and the committed run's numbers are unchanged.
   research policy only, and the unused `prev_signal` computed from the full
   history under the runtime policy is gone (the per-bar window `prev` is what
   the simulator uses).
+
+## Round-2 tooling built (2026-10-22); no round-2 run has happened
+
+Built from the frozen pre-registration
+(docs/superpowers/specs/2026-10-22-preregistration-round2.md): the
+`trend_funding_filter` strategy (NaN funding suppresses new entries, fail
+safe), `config/research_round2.yaml` (10 symbols, 4h, the two frozen grids,
+output under `research/round2/`, shared `research/trials.json`),
+`scripts/run_research.py --config/--trials/--plan` (round-1 defaults
+unchanged; `--plan` loads no data and does not touch the counter) and the 8
+new symbols in `config/symbol_rules.yaml`. Nothing was counted: the trial
+counter is still 60, `research/REPORT.*` and `deployed.json` are untouched, and
+no round-2 results exist. The run will add 90 trials (30 + 60) for a total of
+150.

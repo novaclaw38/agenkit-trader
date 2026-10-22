@@ -6,6 +6,9 @@
 # PRICE_FILTER.tickSize, lot = MARKET_LOT_SIZE.stepSize (else LOT_SIZE),
 # min_notional = MIN_NOTIONAL.notional. The paper runtime re-reads the live
 # values every cycle; these are a snapshot and can drift.
+# BNB..LTC (round-2 universe) added from a second fetch of the same endpoint on
+# 2026-10-22 (BTC/ETH re-checked: unchanged). Testnet filters can differ from
+# mainnet ones; the runtime re-reads the venue's own values every cycle.
 BTCUSDT:
   tick: 0.1
   lot: 0.0001
@@ -14,3 +17,35 @@ ETHUSDT:
   tick: 0.01
   lot: 0.001
   min_notional: 20.0
+BNBUSDT:
+  tick: 0.01
+  lot: 0.01
+  min_notional: 5.0
+SOLUSDT:
+  tick: 0.01
+  lot: 0.01
+  min_notional: 5.0
+XRPUSDT:
+  tick: 0.0001
+  lot: 0.1
+  min_notional: 5.0
+DOGEUSDT:
+  tick: 0.00001
+  lot: 1.0
+  min_notional: 5.0
+ADAUSDT:
+  tick: 0.0001
+  lot: 1.0
+  min_notional: 5.0
+LINKUSDT:
+  tick: 0.001
+  lot: 0.01
+  min_notional: 5.0
+AVAXUSDT:
+  tick: 0.001
+  lot: 1.0
+  min_notional: 5.0
+LTCUSDT:
+  tick: 0.01
+  lot: 0.001
+  min_notional: 5.0
