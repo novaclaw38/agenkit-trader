@@ -74,9 +74,15 @@ max_drawdown`` (``drawdown``). The halt is permanent (a manual reset is
 needed, it does not clear the next day): an open position is flattened at
 that close with costs (reason ``halt``), no further decisions are made and
 equity stays flat to the end; ``halted``, ``halt_reason`` and ``halt_time``
-(the bar) are set on the result. Intrabar marks other than a stop fill
-(e.g. a bar's low with no stop hit) are not checked, so a halt the runtime
-would trigger intrabar and recover from by the close is missed.
+(the bar) are set on the result. Intrabar, the runtime polls within the bar, so an open
+position is also marked at the bar's ADVERSE EXTREME (long: ``cash + q *
+(low - entry)``; short: ``high``) and checked against the same limits; the
+extreme is only reached if no stop fills first (a stop fill is checked
+instead, at the fill, as above). A breach flattens at that extreme price with
+costs (reason ``halt``) and halts at that bar, even if the bar then
+recovers (a dip-that-recovers). The poll is assumed to catch the extreme,
+which is the conservative reading (a real poll interval may miss a brief
+wick). The favourable extreme is not used to raise the peak.
 
 Equity. ``equity[t]`` is the marked-to-close equity at bar ``t`` BEFORE that
 close's decision fills; their costs show from ``equity[t+1]`` on (so
@@ -95,11 +101,26 @@ Trades. One row per position: ``entry_time`` (first bar the position is held,
 and ``ret`` (net return on the equity at entry, including both legs' costs
 and funding).
 
+Signals. ``run_backtest_runtime`` takes a ready signal. The runtime does not
+compute it on the whole history but on the rolling window of the last
+``bars_limit`` closed bars (``Runtime._closed``: ``hist[t-bars_limit+1 :
+t+1]``), with ``prev`` read from that same window (``sig.iloc[-2]``).
+``window_signals`` reproduces that (``prev_signals`` is passed back in);
+``sweep.backtest_params`` and the gate use it under the runtime policy.
+Cost: one ``strategy.signal`` call on ``bars_limit`` rows per simulated bar
+(measured on a 1000-row window: ~2 ms/bar funding_reversion, ~6 ms
+trend_breakout, ~7 ms short_reversion), i.e. a grid point on 17k bars costs
+about 0.5-2 minutes, against one call per grid point for the full-history
+signal (roughly 1000x more strategy work). Grid points whose
+strategy warm-up (``strategy.warmup(params)``, which includes the lookback)
+reaches ``bars_limit`` are refused with ``WindowError``: in the runtime's
+window they would never leave flat.
+
 What this cannot reproduce: real exchange stop fills (the fill rule above
 is a model), testnet fills and fees, live slippage against a 1h-ATR stop,
-intrabar kill-switch triggers other than right after a stop fill, and
-strategies whose signal depends on the runtime's limited ``bars_limit``
-window (research computes signals on the whole history).
+the real polling interval of the kill switch, and signals from a ready
+series that were computed on a longer history than the runtime's window
+(use ``window_signals``).
 """
 
 from __future__ import annotations
@@ -139,6 +160,47 @@ TRADE_COLUMNS = [
 ]
 _OHLC = ["open", "high", "low", "close"]
 _EPS = 1e-12  # the gate's relative tolerance on limits
+
+
+class WindowError(ValueError):
+    """A grid point cannot be evaluated on the runtime's window."""
+
+
+def window_signals(
+    strategy: Any,
+    hist: pd.DataFrame,
+    params: dict[str, Any],
+    aux: dict[str, pd.Series],
+    bars_limit: int,
+    start: int = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """``(target, prev)`` signs for rows ``start..`` of ``hist``, each from
+    the runtime's window ``hist[t-bars_limit+1 : t+1]`` (shorter at the start
+    of ``hist``): ``target = sign(signal[-1])``, ``prev = sign(signal[-2])``
+    of that window, as ``Runtime._step`` reads them. ``aux`` must be indexed
+    like ``hist``. Cost: see the module docstring."""
+    n = len(hist)
+    wf = getattr(strategy, "warmup", None)
+    need = int(wf(params)) if callable(wf) else 0
+    if need >= bars_limit:
+        raise WindowError(
+            f"strategy warm-up of {need} bars (lookback included) reaches the "
+            f"runtime window of {bars_limit} bars: the runtime would never "
+            "trade this parameter point"
+        )
+    aux = {k: v.reindex(hist.index) for k, v in aux.items()}
+    target = np.zeros(n - start)
+    prev = np.zeros(n - start)
+    for j, t in enumerate(range(start, n)):
+        lo = max(0, t + 1 - bars_limit)
+        w = hist.iloc[lo : t + 1]
+        sig = strategy.signal(
+            w, params, {k: v.iloc[lo : t + 1] for k, v in aux.items()}
+        )
+        v = np.nan_to_num(sig.to_numpy(dtype="float64")[-2:], nan=0.0)
+        target[j] = np.sign(v[-1])
+        prev[j] = np.sign(v[-2]) if len(v) > 1 else 0.0
+    return target, prev
 
 
 @dataclass(frozen=True)
@@ -242,8 +304,11 @@ def run_backtest_runtime(
     *,
     warmup: pd.DataFrame | None = None,
     prev_signal: float = 0.0,
+    prev_signals: np.ndarray | None = None,
 ) -> BacktestResult:
-    """Simulate the runtime's policy on ``signal``; see the module docstring."""
+    """Simulate the runtime's policy on ``signal``; see the module docstring.
+    ``prev_signals`` (``window_signals``) gives the per-bar ``prev`` the
+    runtime would read; without it ``prev`` is the previous bar's signal."""
     if not np.isfinite(equity0) or equity0 <= 0:
         raise ValueError(f"equity0 must be finite and > 0, got {equity0!r}")
     if not math.isfinite(prev_signal):
@@ -256,6 +321,10 @@ def run_backtest_runtime(
     if not np.isfinite(raw).all():
         raise ValueError("signal contains NaN or inf (use 0.0 for flat explicitly)")
     sgn = np.sign(raw)
+    if prev_signals is not None:
+        prev_arr = np.sign(np.asarray(prev_signals, dtype="float64"))
+        if prev_arr.shape != raw.shape or not np.isfinite(prev_arr).all():
+            raise ValueError("prev_signals must be finite, one per bar")
     px = _ohlc(bars, "bars")
     hist = px
     off = 0
@@ -377,6 +446,17 @@ def run_backtest_runtime(
                         halt_time, last = index[t], t + 1
                         break
         if q != 0:
+            # the runtime polls within the bar: mark at the adverse extreme
+            adv = float(lo[t] if q > 0 else h[t])
+            eq_adv = cash + q * (adv - entry_px)
+            mark(eq_adv, int(open_day[t]))
+            halt_reason = breach(eq_adv)
+            if halt_reason is not None:
+                close_pos(t, adv, "halt")
+                ruined = not cash > 0
+                equity[t] = max(cash, 0.0)
+                halt_time, last = index[t], t + 1
+                break
             cash -= q * cl[t] * fund_close[t]
         mtm = cash + q * (cl[t] - entry_px)
         if not mtm > 0:
@@ -403,7 +483,8 @@ def run_backtest_runtime(
                 close_pos(t, float(cl[t]), "end")
             equity[t] = max(cash, 0.0)
             break
-        if target != 0 and q == 0 and target != prev and not try_enter(t, target):
+        pv = float(prev_arr[t]) if prev_signals is not None else prev
+        if target != 0 and q == 0 and target != pv and not try_enter(t, target):
             skipped += 1
         prev = target
     if halt_reason is not None:

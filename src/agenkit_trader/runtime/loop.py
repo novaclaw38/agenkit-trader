@@ -151,16 +151,18 @@ class Deployment:
 
 
 _DEPLOYED_KEYS = {"name", "symbol", "interval", "params", "allowed_regimes"}
-# Optional: the validation policy that produced the entry (report.py writes
-# it; older files lack it). Accepted and validated only.
-_DEPLOYED_POLICIES = ("research", "runtime")
+# The validation policy that produced the entry (report.py writes it). Only
+# "runtime" is accepted: a verdict under the research policy (fraction-of-
+# equity sizing, no stops) does not validate what this runtime trades.
+_DEPLOYED_POLICY = "runtime"
 
 
 def load_deployed(path: Path) -> list[Deployment]:
     """Read the validation gate's ``deployed.json`` (a JSON list of
-    ``{name, symbol, interval, params, allowed_regimes}``, optionally with
-    ``policy`` in ``_DEPLOYED_POLICIES``). Raises
-    ``DeployedError`` if it is missing, unreadable, malformed or EMPTY."""
+    ``{name, symbol, interval, params, allowed_regimes, policy}``, where
+    ``policy`` must be exactly ``"runtime"``). Raises ``DeployedError`` if it
+    is missing, unreadable, malformed, EMPTY, or has an entry whose policy is
+    missing or not ``"runtime"``."""
     path = Path(path)
     if not path.exists():
         raise DeployedError(
@@ -185,11 +187,14 @@ def load_deployed(path: Path) -> list[Deployment]:
         if not isinstance(e, dict) or set(e) - {"policy"} != _DEPLOYED_KEYS:
             raise DeployedError(
                 f"{path}[{i}]: expected exactly the keys {sorted(_DEPLOYED_KEYS)}"
-                " (plus an optional policy)"
+                ' plus "policy"'
             )
-        if "policy" in e and e["policy"] not in _DEPLOYED_POLICIES:
+        if e.get("policy") != _DEPLOYED_POLICY:
             raise DeployedError(
-                f"{path}[{i}]: policy must be one of {list(_DEPLOYED_POLICIES)}"
+                f'{path}[{i}]: policy must be exactly "{_DEPLOYED_POLICY}" (a '
+                "missing policy or a research-policy verdict does not validate "
+                "what the runtime trades: re-run the research with "
+                "--policy runtime)"
             )
         ok = (
             all(isinstance(e[k], str) and e[k] for k in ("name", "symbol", "interval"))

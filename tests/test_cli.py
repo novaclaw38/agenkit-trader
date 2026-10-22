@@ -87,12 +87,36 @@ def test_paper_refuses_unknown_strategy(
                     "interval": "1h",
                     "params": {},
                     "allowed_regimes": ["trend"],
+                    "policy": "runtime",
                 }
             ]
         )
     )
     assert paper("--deployed", str(d), tmp_path=tmp_path) != 0
     assert "unknown strategy" in capsys.readouterr().err
+    assert no_network == []
+
+
+def test_paper_refuses_research_policy_entry(
+    no_network: list[str], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    d = tmp_path / "deployed.json"
+    d.write_text(
+        json.dumps(
+            [
+                {
+                    "name": "trend_breakout",
+                    "symbol": "BTCUSDT",
+                    "interval": "1h",
+                    "params": {"lookback": 48, "vol_cap": 1.0},
+                    "allowed_regimes": ["range", "trend"],
+                    "policy": "research",
+                }
+            ]
+        )
+    )
+    assert paper("--deployed", str(d), "--once", tmp_path=tmp_path) != 0
+    assert "does not validate what the runtime" in capsys.readouterr().err
     assert no_network == []
 
 
@@ -114,6 +138,7 @@ def test_paper_refuses_without_keys(
                     "interval": "1h",
                     "params": {"lookback": 96, "vol_cap": 1.5},
                     "allowed_regimes": ["range", "trend"],
+                    "policy": "runtime",
                 }
             ]
         )
@@ -190,6 +215,7 @@ def _deployed(tmp_path: Path, regimes: list[str] | None = None) -> Path:
                     "interval": "1h",
                     "params": {"lookback": 96, "vol_cap": 1.5},
                     "allowed_regimes": regimes or ["range", "trend"],
+                    "policy": "runtime",
                 }
             ]
         )

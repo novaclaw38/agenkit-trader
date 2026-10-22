@@ -57,7 +57,7 @@ import pandas as pd
 
 from agenkit_trader.backtest.costs import CostModel
 from agenkit_trader.backtest.engine import BacktestResult
-from agenkit_trader.backtest.runtime_policy import RuntimePolicy
+from agenkit_trader.backtest.runtime_policy import RuntimePolicy, window_signals
 from agenkit_trader.backtest.stats import Stats, compute_stats
 from agenkit_trader.config import GateConfig
 from agenkit_trader.data.lookahead import LookaheadError, assert_no_lookahead
@@ -313,6 +313,15 @@ def evaluate(
     # transition (the runtime never enters mid-signal)
     warm = train if policy == "runtime" else None
     prev = float(np.sign(full_pos.loc[train.index[-1]]))
+    prev_signals = None
+    if policy == "runtime":
+        # ... and each hold-out signal comes from the runtime's rolling window
+        # over train + hold-out, not the full history
+        rp = runtime_policy or RuntimePolicy()
+        tgt, prev_signals = window_signals(
+            strategy, full, params, full_aux, rp.runtime.bars_limit, len(train)
+        )
+        pos = pd.Series(tgt, index=hold.index)
     c2_costs = costs.scaled(gate_cfg.cost_multiplier)
     ho, c2 = (
         simulate(
@@ -325,6 +334,7 @@ def evaluate(
             runtime_policy=runtime_policy,
             warmup=warm,
             prev_signal=prev,
+            prev_signals=prev_signals,
         )
         for c in (costs, c2_costs)
     )

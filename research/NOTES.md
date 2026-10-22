@@ -106,3 +106,30 @@ is rejected), rounds quantities and stops with static testnet symbol rules
 (`config/symbol_rules.yaml`), and `--policy` has no default: every counted
 run must choose it explicitly. The committed run's statements and numbers
 are unchanged.
+
+## Simulator fixes: signal window, intrabar halt, deployed policy (added later)
+
+No research run was made for these changes; REPORT.*, trials.json and
+deployed.json are untouched and the committed run's numbers are unchanged.
+
+- Signal window. The runtime-policy simulator took signals computed on the
+  whole history, while the runtime computes them on its rolling
+  `bars_limit` window (`hist[t-bars_limit+1 : t+1]`), with `prev` read from
+  that window. Under `--policy runtime` signals are now computed per bar on
+  that window (`window_signals`), and a grid point whose strategy warm-up
+  (lookback included) reaches `bars_limit` is refused. A parity test compares
+  these signals with the real runtime for trend_breakout lookback 336 /
+  vol_cap 1.0 on random-walk data. Cost: about 1000x the signal work, 2-7 ms
+  per bar (0.5-2 minutes per grid point on 17k bars); a runtime-policy sweep
+  will be much slower than the research one.
+- Intrabar halt. The simulator checked the 3%/10% limits only at closes and
+  after a stop fill. An open position is now also marked at the bar's adverse
+  extreme and a breach halts and flattens at that price. This assumes the
+  runtime's poll sees the extreme (conservative; a real poll interval may
+  miss a brief wick), and the favourable extreme is not used to raise the
+  peak. Parity-tested with a dip-that-recovers bar.
+- deployed.json. `load_deployed` now refuses entries whose `policy` is not
+  exactly `"runtime"` (missing included). The report already wrote `policy`
+  for both policies. The committed research-policy run's file is empty, so
+  nothing changes for it, but any future research-policy pass cannot be paper
+  traded.

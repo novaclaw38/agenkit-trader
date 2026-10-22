@@ -183,23 +183,21 @@ def test_signal_on_across_the_split_is_not_a_holdout_entry(tmp_path: Path) -> No
     assert v.holdout.n_trades == 0  # the runtime would not enter mid-signal
 
 
-def test_sweep_segment_honours_prev_signal_and_warmup() -> None:
+def test_segment_reads_prev_from_the_window_with_warmup() -> None:
+    """Under the runtime policy ``prev`` is read from the runtime's window, so
+    warm-up history that already holds the signal on is not a fresh
+    transition at the segment start; without it bar 0 is one (here skipped:
+    no ATR yet)."""
     bars, aux = market(1, n=600)
     bars = _ranged(bars)
     warm, seg = bars.iloc[:300], bars.iloc[300:]
-    kw: dict[str, Any] = dict(aux=aux, tolerance=0.5, policy="runtime", warmup=warm)
     s = AlwaysLong()
-    fresh = neighbourhood_sweep(s, seg, costs(), s.param_grid, **kw)  # type: ignore[arg-type]
-    cont = neighbourhood_sweep(
-        s,
-        seg,
-        costs(),
-        s.param_grid,
-        prev_signal=1.0,
-        **kw,  # type: ignore[arg-type]
-    )
-    assert (fresh.table["n_trades"] == 1).all()
-    assert (cont.table["n_trades"] == 0).all()
+    kw: dict[str, Any] = dict(policy="runtime")
+    p = s.param_grid and {k: v[0] for k, v in s.param_grid.items()}
+    fresh = vsweep.backtest_params(s, seg, aux, p, costs(), **kw)  # type: ignore[arg-type]
+    cont = vsweep.backtest_params(s, seg, aux, p, costs(), warmup=warm, **kw)  # type: ignore[arg-type]
+    assert fresh.skipped_entries == 1 and fresh.stats.n_trades == 0
+    assert cont.skipped_entries == 0 and cont.stats.n_trades == 0
 
 
 def test_halted_holdout_is_rejected(
@@ -307,3 +305,22 @@ def test_run_research_requires_a_policy() -> None:
     assert p.parse_args(["--policy", "runtime"]).policy == "runtime"
     with pytest.raises(SystemExit):
         p.parse_args(["--policy", "paper"])
+
+
+def test_grid_point_beyond_the_runtime_window_is_refused() -> None:
+    from agenkit_trader.backtest.runtime_policy import WindowError
+    from agenkit_trader.strategies import REGISTRY
+
+    bars, aux = market(1, n=900)
+    strat = REGISTRY["trend_breakout"]  # warm-up 722 bars
+    rp = RuntimePolicy(RiskConfig(), RuntimeConfig(bars_limit=600))
+    with pytest.raises(WindowError, match="runtime window"):
+        vsweep.backtest_params(
+            strat,
+            _ranged(bars),
+            aux,
+            {"lookback": 48, "vol_cap": 1.0},
+            costs(),
+            policy="runtime",
+            runtime_policy=rp,
+        )

@@ -30,7 +30,11 @@ import pandas as pd
 
 from agenkit_trader.backtest.costs import CostModel
 from agenkit_trader.backtest.engine import BacktestResult, run_backtest
-from agenkit_trader.backtest.runtime_policy import RuntimePolicy, run_backtest_runtime
+from agenkit_trader.backtest.runtime_policy import (
+    RuntimePolicy,
+    run_backtest_runtime,
+    window_signals,
+)
 from agenkit_trader.strategies.base import Strategy
 
 
@@ -87,6 +91,7 @@ def simulate(
     runtime_policy: RuntimePolicy | None = None,
     warmup: pd.DataFrame | None = None,
     prev_signal: float = 0.0,
+    prev_signals: np.ndarray | None = None,
 ) -> BacktestResult:
     """Backtest ``positions`` under ``policy`` (see the module docstring).
     Runtime policy only: ``warmup`` is earlier history for the ATR and
@@ -107,6 +112,7 @@ def simulate(
         rp.rules,
         warmup=warmup,
         prev_signal=prev_signal,
+        prev_signals=prev_signals,
     )
 
 
@@ -124,7 +130,31 @@ def backtest_params(
     warmup: pd.DataFrame | None = None,
     prev_signal: float = 0.0,
 ) -> BacktestResult:
-    """Signal on exactly ``bars`` (aux restricted to its index) and backtest."""
+    """Signal on exactly ``bars`` (aux restricted to its index) and backtest.
+    Under the runtime policy each bar's signal is computed on the runtime's
+    rolling window (``window_signals``; ``warmup`` bars precede ``bars``)."""
+    if policy == "runtime":
+        check_policy(policy)
+        rp = runtime_policy or RuntimePolicy()
+        hist = bars if warmup is None else pd.concat([warmup, bars])
+        tgt, prv = window_signals(
+            strategy, hist, params, aux, rp.runtime.bars_limit, len(hist) - len(bars)
+        )
+        pos = to_positions(
+            pd.Series(tgt, index=bars.index), pd.DatetimeIndex(bars.index)
+        )
+        return simulate(
+            bars,
+            pos,
+            costs,
+            funding,
+            equity0,
+            policy=policy,
+            runtime_policy=rp,
+            warmup=warmup,
+            prev_signal=prev_signal,
+            prev_signals=prv,
+        )
     sub_aux = {k: v.reindex(bars.index) for k, v in aux.items()}
     pos = to_positions(
         strategy.signal(bars, params, sub_aux), pd.DatetimeIndex(bars.index)

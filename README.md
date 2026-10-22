@@ -117,12 +117,24 @@ is REQUIRED, so a counted run always chooses deliberately; the report and
 `deployed.json` record the policy. The COMMITTED run used the research
 policy; its numbers are unchanged and say nothing about the runtime policy.
 
+Three changes made the simulator closer to the runtime (not yet used for any
+counted run): (1) under the runtime policy each bar's signal is computed on
+the runtime's rolling `bars_limit` window, as `runtime/loop.py` does, not on
+the full history (this matters for trend_breakout lookback 336; a parity test
+checks it against the real runtime), at roughly 1000x the signal cost (about
+0.5-2 minutes per grid point on 17k bars); grid points whose strategy warm-up
+reaches `bars_limit` are refused. (2) `load_deployed` refuses any
+`deployed.json` entry whose `policy` is not exactly `"runtime"`, since a
+research-policy verdict does not validate what the runtime trades; a file
+from the committed research-policy run would be refused. (3) An open position
+is marked at the bar's adverse extreme (low for longs, high for shorts) for
+the 3% / 10% halt, so a dip that recovers by the close halts, as the
+runtime's polling would; this assumes the poll catches the extreme.
+
 Even the runtime policy cannot validate real exchange stop fills, testnet
-fills and fees, how a 1h-ATR stop interacts with live slippage, or intrabar
-kill-switch triggers other than right after a stop fill. trend_breakout's
-signal on the runtime's 1000-bar window can differ from the full-history
-signal (lookback 336; see `tests/strategies/test_runtime_window.py`). A new
-run is a new counted trial; whether to make one is the user's decision.
+fills and fees, how a 1h-ATR stop interacts with live slippage, or the real
+polling interval of the kill switch. A new run is a new counted trial;
+whether to make one is the user's decision.
 
 ## Development
 

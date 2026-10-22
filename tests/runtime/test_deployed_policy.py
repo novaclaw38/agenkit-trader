@@ -1,4 +1,5 @@
-"""deployed.json entries may carry the validation ``policy`` (new schema)."""
+"""deployed.json entries must carry policy == \"runtime\": a research-policy
+verdict does not validate what the runtime trades."""
 
 from __future__ import annotations
 
@@ -24,20 +25,36 @@ def _write(tmp_path: Path, entry: dict[str, object]) -> Path:
     return p
 
 
-@pytest.mark.parametrize("policy", ["research", "runtime"])
-def test_policy_key_is_accepted(tmp_path: Path, policy: str) -> None:
-    d = load_deployed(_write(tmp_path, {**BASE, "policy": policy}))
+def test_runtime_policy_is_accepted(tmp_path: Path) -> None:
+    d = load_deployed(_write(tmp_path, {**BASE, "policy": "runtime"}))
     assert d[0].name == "trend_breakout" and d[0].symbol == "ETHUSDT"
 
 
-def test_entry_without_policy_still_loads(tmp_path: Path) -> None:
-    assert load_deployed(_write(tmp_path, BASE))[0].interval == "1h"
+def test_research_policy_is_refused_with_a_clear_message(tmp_path: Path) -> None:
+    with pytest.raises(DeployedError, match="does not validate what the runtime"):
+        load_deployed(_write(tmp_path, {**BASE, "policy": "research"}))
 
 
-@pytest.mark.parametrize("bad", ["paper", "", 1, None])
-def test_unknown_policy_is_refused(tmp_path: Path, bad: object) -> None:
+def test_entry_without_policy_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(DeployedError, match="does not validate what the runtime"):
+        load_deployed(_write(tmp_path, BASE))
+
+
+@pytest.mark.parametrize("bad", ["paper", "", 1, None, "Runtime", "runtime "])
+def test_any_other_policy_is_refused(tmp_path: Path, bad: object) -> None:
     with pytest.raises(DeployedError, match="policy"):
         load_deployed(_write(tmp_path, {**BASE, "policy": bad}))
+
+
+def test_one_research_entry_among_runtime_ones_refuses_the_file(
+    tmp_path: Path,
+) -> None:
+    p = tmp_path / "deployed.json"
+    p.write_text(
+        json.dumps([{**BASE, "policy": "runtime"}, {**BASE, "policy": "research"}])
+    )
+    with pytest.raises(DeployedError, match=r"\[1\]"):
+        load_deployed(p)
 
 
 def test_other_extra_keys_still_refused(tmp_path: Path) -> None:

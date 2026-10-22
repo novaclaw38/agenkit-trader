@@ -637,6 +637,7 @@ def test_load_deployed_reads_entries(tmp_path: Path) -> None:
                     "interval": "1h",
                     "params": {"lookback": 96, "vol_cap": 1.5},
                     "allowed_regimes": ["trend"],
+                    "policy": "runtime",
                 }
             ]
         )

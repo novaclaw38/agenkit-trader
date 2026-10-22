@@ -258,7 +258,11 @@ def test_ruin_clips_equity_and_stops_trading() -> None:
     b = flat_bars()
     b.loc[b.index[25], ["open", "high", "low", "close"]] = [80.0, 81.0, 79.0, 80.0]
     risky = RiskConfig(
-        max_risk_per_trade=1.0, max_leverage=1000.0, max_symbol_notional_frac=1000.0
+        max_risk_per_trade=1.0,
+        max_leverage=1000.0,
+        max_symbol_notional_frac=1000.0,
+        max_daily_loss=1.0,  # kill switch off: this test is about ruin
+        max_drawdown=1.0,
     )
     res = run(b, sig(b, {(20, 25): 1.0, (30, 40): 1.0}), risk=risky)
     assert res.ruined
@@ -393,7 +397,7 @@ def test_daily_loss_halt_after_stop_fill_is_permanent() -> None:
 def test_halt_at_close_flattens_with_costs() -> None:
     c = CostModel(0.001, 0.0, 0.0, 0.0)
     b = flat_bars()
-    b.loc[b.index[22], ["low", "close"]] = [95.0, 96.0]
+    b.loc[b.index[22], ["low", "close"]] = [96.0, 96.0]  # low == close
     risk = RiskConfig(max_daily_loss=0.005, max_drawdown=1.0)
     res = run(b, sig(b, {(20, 40): 1.0}), costs=c, risk=risk)
     assert res.halted and res.halt_reason == "daily_loss"
@@ -416,7 +420,7 @@ def test_drawdown_halt_reason() -> None:
 def test_halt_threshold_is_at_or_above_the_limit() -> None:
     b = flat_bars()
     b.loc[b.index[22], ["low", "close"]] = [95.0, 96.0]
-    loss = (1000.0 - (1000.0 + QTY * -4.0)) / 1000.0
+    loss = (1000.0 - (1000.0 + QTY * -5.0)) / 1000.0  # at the bar's low, 95
     at = run(b, sig(b, {(20, 40): 1.0}), risk=RiskConfig(max_daily_loss=loss))
     above = run(b, sig(b, {(20, 40): 1.0}), risk=RiskConfig(max_daily_loss=loss * 1.01))
     assert at.halted and not above.halted
@@ -424,15 +428,15 @@ def test_halt_threshold_is_at_or_above_the_limit() -> None:
 
 def test_daily_loss_resets_at_the_utc_day_boundary() -> None:
     b = flat_bars(60)
-    b.loc[b.index[22], ["low", "close"]] = [97.0, 97.6]
-    b.loc[b.index[32], ["low", "close"]] = [97.0, 97.6]
+    b.loc[b.index[22], ["low", "close"]] = [97.6, 97.6]
+    b.loc[b.index[32], ["low", "close"]] = [97.6, 97.6]
     risk = RiskConfig(max_daily_loss=0.005, max_drawdown=1.0)
     # day 1: -0.4% ; day 2 (from the 00:00 close): another -0.4% -> no halt
     res = run(b, sig(b, {(20, 22): 1.0, (30, 32): 1.0}), risk=risk)
     assert not res.halted
     assert res.stats.n_trades == 2
     b2 = b.copy()
-    b2.loc[b2.index[16], ["low", "close"]] = [97.0, 97.6]
+    b2.loc[b2.index[16], ["low", "close"]] = [97.6, 97.6]
     same_day = run(b2, sig(b2, {(14, 16): 1.0, (20, 22): 1.0}), risk=risk)
     assert same_day.halted and same_day.halt_reason == "daily_loss"
 
@@ -507,3 +511,52 @@ def test_stop_in_the_last_bar_of_a_utc_day_halts_on_that_day() -> None:
     res = run(b, sig(b, {(20, 40): 1.0}), risk=RiskConfig(max_drawdown=1.0))
     assert res.halted and res.halt_reason == "daily_loss"
     assert res.halt_time == b.index[23]
+
+
+# ------------------------------------------------- intrabar kill-switch check
+
+LIMIT = RiskConfig(max_daily_loss=0.005, max_drawdown=1.0)
+
+
+def test_dip_that_recovers_halts_at_the_adverse_low() -> None:
+    """Close recovers to 100 (no loss at any close), the low marks -2.4%
+    of notional = 0.4% of equity... enough with a 0.3% limit: halt at the low."""
+    b = flat_bars()
+    b.loc[b.index[22], ["low", "close"]] = [97.6, 100.0]
+    risk = RiskConfig(max_daily_loss=0.003, max_drawdown=1.0)
+    res = run(b, sig(b, {(20, 40): 1.0}), risk=risk)
+    assert res.halted and res.halt_reason == "daily_loss"
+    assert res.halt_time == b.index[22]
+    t = res.trades.iloc[-1]
+    assert t["exit_reason"] == "halt" and t["exit_price"] == 97.6
+    assert (res.equity.iloc[22:] == res.equity.iloc[22]).all()
+    assert res.equity.iloc[22] == pytest.approx(1000.0 - QTY * 2.4)
+    # a limit just above the dip does not halt
+    ok = run(b, sig(b, {(20, 40): 1.0}), risk=RiskConfig(max_daily_loss=0.0041))
+    assert not ok.halted
+
+
+def test_short_is_marked_at_the_bar_high() -> None:
+    b = flat_bars()
+    b.loc[b.index[22], ["high", "close"]] = [102.4, 100.0]
+    res = run(b, sig(b, {(20, 40): -1.0}), risk=RiskConfig(max_daily_loss=0.003))
+    assert res.halted and res.trades.iloc[-1]["exit_price"] == 102.4
+    assert res.trades.iloc[-1]["exit_reason"] == "halt"
+
+
+def test_intrabar_halt_never_marks_the_favourable_extreme() -> None:
+    b = flat_bars()
+    b.loc[b.index[22], ["high", "close"]] = [110.0, 100.0]  # long: up-spike
+    res = run(b, sig(b, {(20, 40): 1.0}), risk=RiskConfig(max_daily_loss=0.003))
+    assert not res.halted
+
+
+def test_stop_fill_replaces_the_adverse_extreme() -> None:
+    """The bar's low is far below the stop, but the position was stopped at
+    the stop price: the loss that is checked is the stop fill's."""
+    b = flat_bars()
+    b.loc[b.index[22], ["low", "close"]] = [50.0, 50.0]
+    risk = RiskConfig(max_daily_loss=0.0101)  # stop loses exactly 1% of equity
+    res = run(b, sig(b, {(20, 40): 1.0}), risk=risk)
+    assert list(res.trades["exit_reason"]) == ["stop"]
+    assert not res.halted

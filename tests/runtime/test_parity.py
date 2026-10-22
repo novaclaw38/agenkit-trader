@@ -19,7 +19,9 @@ mirrored). The parity test therefore checks that the runtime, given those
 stop fills, makes the same decisions; it does not validate real exchange
 stop fills, testnet fills, fees or slippage. Costs and funding are zero here
 (the venue's equity is driven by the harness from fills), and the kill
-switch's daily-loss/drawdown limits are disabled.
+switch's daily-loss/drawdown limits are disabled except in the halt tests.
+The harness also plays the intrabar poll: one cycle per bar with the venue
+equity marked at the bar's adverse extreme (the simulator's rule).
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from agenkit_trader.backtest.costs import CostModel
 from agenkit_trader.backtest.runtime_policy import run_backtest_runtime
@@ -170,9 +173,8 @@ def run_runtime(
     def flatten() -> None:
         pos = venue.positions.get(SYM)
         if pos is not None:
-            close_trade(
-                pos.qty, pos.entry_price, float(bars["close"].iloc[acc["k"]]), "halt"
-            )
+            px = acc.get("px", float(bars["close"].iloc[acc["k"]]))
+            close_trade(pos.qty, pos.entry_price, px, "halt")
         real_flatten()
         venue.equity = acc["realized"]
 
@@ -223,6 +225,17 @@ def run_runtime(
                     break
         # --- venue state at the close of bar k ---
         pos = venue.positions.get(SYM)
+        if pos is not None and k > first:
+            # no stop hit: the runtime polls within the bar, at the bar's
+            # adverse extreme (long: low, short: high)
+            adv = float(bar["low"] if pos.qty > 0 else bar["high"])
+            acc["px"] = adv
+            venue.equity = acc["realized"] + pos.qty * (adv - pos.entry_price)
+            cycle(k, bars.index[k] + pd.Timedelta(minutes=45), k)
+            acc.pop("px")
+            if kill.halted:
+                halt_bar = k
+                break
         close = float(bar["close"])
         venue.equity = acc["realized"] + (
             pos.qty * (close - pos.entry_price) if pos else 0.0
@@ -368,3 +381,119 @@ def test_costs_parity_without_halt(tmp_path: Path) -> None:
     assert rt_halt is None
     assert _sim_rows(res) == _rt_rows(rt_trades)
     assert res.skipped_entries == rt_skipped
+
+
+def dip_scenario() -> tuple[pd.DataFrame, pd.Series]:
+    """halt_scenario's two stop-outs, then a long whose bar 22 DIPS to 92.3
+    (above its stop at 94) and closes back at 100: no close-based check
+    sees a loss, the intrabar poll at the low does."""
+    b, s = halt_scenario(gap_stop=False)
+    b.iloc[22, [b.columns.get_loc("low"), b.columns.get_loc("close")]] = [92.3, 100.0]
+    return b, s
+
+
+def test_intrabar_dip_that_recovers_halts_like_the_runtime(tmp_path: Path) -> None:
+    bars, sig = dip_scenario()
+    risk = RiskConfig()
+    rules = FakeVenue().rules[SYM]
+    res = run_backtest_runtime(bars, sig, COSTS, None, 1000.0, risk, RT, rules)
+    rt_trades, _, rt_halt = run_runtime(tmp_path, bars, sig, risk, COSTS, first=14)
+    assert _sim_rows(res) == _rt_rows(rt_trades)
+    assert [r[5] for r in _sim_rows(res)] == ["stop", "stop", "halt"]
+    assert res.halted and res.halt_reason == "daily_loss"
+    assert rt_halt == 22 and res.halt_time == bars.index[22]
+    assert _sim_rows(res)[-1][6] == 92.3  # flattened at the low, not the close
+    # without the intrabar check this bar (close 100) would not have halted
+    assert bars["close"].iloc[22] == 100.0
+
+
+# ---- window parity: signals computed on the runtime's rolling window -------
+
+
+def _walk(seed: int, n: int) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    c = 100 * np.cumprod(1 + rng.normal(0, 0.01, n))
+    h = c * (1 + np.abs(rng.normal(0, 0.004, n)))
+    lo = c * (1 - np.abs(rng.normal(0, 0.004, n)))
+    idx = pd.date_range("2024-01-01", periods=n, freq="1h", tz="UTC")
+    return pd.DataFrame(
+        {"open": c, "high": h, "low": lo, "close": c, "volume": 1.0}, index=idx
+    )
+
+
+def _runtime_signals(
+    tmp_path: Path, bars: pd.DataFrame, strat: Any, params: dict[str, Any], first: int
+) -> dict[int, tuple[float, float]]:
+    """(target, prev_target) the real Runtime logs at each closed bar."""
+    venue = FakeVenue()
+    log = DecisionLog(tmp_path / "decisions.jsonl")
+    kill = KillSwitch(venue, log, RISK)
+    gate = RiskGate(RISK, venue.symbol_rules, log)
+    dep = Deployment(strat.name, SYM, "1h", params, list(REGIMES))
+    clock = {"now": venue.now}
+    rt = Runtime(
+        venue,
+        [strat],
+        [dep],
+        gate,
+        kill,
+        log,
+        lambda: clock["now"],
+        runtime_cfg=RT,
+        state_path=tmp_path / "state.json",
+        init_state=True,
+    )
+    for k in range(first, len(bars)):
+        forming = bars.iloc[[k]].copy()
+        forming.index = pd.DatetimeIndex([bars.index[k] + STEP])
+        venue.bars[SYM] = pd.concat([bars.iloc[: k + 1], forming])
+        now = bars.index[k] + STEP + pd.Timedelta(seconds=30)
+        clock["now"] = venue.now = now.to_pydatetime()
+        venue.equity = 1000.0
+        if k == first:
+            rt.start()
+        rt.cycle()
+        assert not kill.halted
+    out: dict[int, tuple[float, float]] = {}
+    for line in (tmp_path / "decisions.jsonl").read_text().splitlines():
+        r = json.loads(line)
+        if r["kind"] == "signal":
+            t = int((pd.Timestamp(r["inputs"]["bar_open"]) - bars.index[0]) / STEP)
+            out[t] = (r["output"]["target"], r["output"]["prev_target"])
+    return out
+
+
+def test_window_signals_equal_runtime_signals_trend_breakout_336(
+    tmp_path: Path,
+) -> None:
+    from agenkit_trader.backtest.runtime_policy import window_signals
+    from agenkit_trader.strategies import REGISTRY
+
+    strat = REGISTRY["trend_breakout"]
+    params = {"lookback": 336, "vol_cap": 1.0}
+    first = RT.bars_limit + 20
+    differs = 0
+    for seed in (0, 1):
+        bars = _walk(seed, first + 400)
+        d = tmp_path / f"s{seed}"
+        d.mkdir()
+        rt = _runtime_signals(d, bars, strat, params, first)
+        tgt, prv = window_signals(strat, bars, params, {}, RT.bars_limit, first)
+        assert sorted(rt) == list(range(first, len(bars)))
+        assert [rt[t] for t in range(first, len(bars))] == list(
+            zip(tgt.tolist(), prv.tolist(), strict=True)
+        )
+        full = strat.signal(bars, params, {})
+        differs += int((np.sign(full.iloc[first:].to_numpy()) != tgt).sum())
+    assert differs > 0, "full-history signal differs from the window here"
+
+
+def test_window_guard_refuses_lookback_plus_warmup_beyond_bars_limit() -> None:
+    from agenkit_trader.backtest.runtime_policy import WindowError, window_signals
+    from agenkit_trader.strategies import REGISTRY
+
+    strat = REGISTRY["trend_breakout"]
+    bars = _walk(0, 300)
+    with pytest.raises(WindowError, match="runtime window"):
+        window_signals(strat, bars, {"lookback": 336, "vol_cap": 1.0}, {}, 700, 0)
+    window_signals(strat, bars, {"lookback": 48, "vol_cap": 1.0}, {}, 1000, 290)
