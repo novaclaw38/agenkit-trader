@@ -1,7 +1,7 @@
 """Runtime loop against FakeVenue: every order via the gate, fail closed."""
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -995,3 +995,85 @@ def test_bars_request_never_exceeds_binance_max(tmp_path: Path) -> None:
     h.rt.start()
     h.rt.cycle()
     assert seen and max(seen) <= 1500
+
+
+# ================================================================ fix round 2
+# Stop repair is bounded: one attempt per uncovered episode, then escalate.
+
+
+def _started_long(tmp_path: Path) -> Harness:
+    h = Harness(tmp_path, venue=_long_with_stop(), strategy=Scripted({LAST: 1.0}))
+    h.rt.start()
+    return h
+
+
+def _tick(h: Harness, k: int) -> None:
+    h.now = NOW + timedelta(seconds=30 * k)
+    h.venue.now = h.now
+    h.rt.cycle()
+
+
+def test_unreported_stop_escalates_instead_of_repairing_forever(
+    tmp_path: Path,
+) -> None:
+    h = _started_long(tmp_path)
+    v = h.venue
+    before = len(v.stops_placed)
+    v.get_open_orders = lambda: []  # type: ignore[method-assign]
+    for k in range(1, 6):
+        _tick(h, k)
+    assert h.kill.halted and v.flatten_calls == 1 and v.positions == {}
+    assert len(v.stops_placed) - before <= 1
+    assert any(r["result"] == "escalate" for r in h.records("stop_coverage"))
+
+
+def test_zero_quantity_read_back_escalates_without_churn(tmp_path: Path) -> None:
+    h = _started_long(tmp_path)
+    v = h.venue
+    real = v.get_open_orders
+
+    def zero_qty() -> Any:
+        return [replace(o, qty=0.0) for o in real()]
+
+    v.get_open_orders = zero_qty  # type: ignore[method-assign]
+    for k in range(1, 4):
+        _tick(h, k)
+    assert h.kill.halted
+    assert not any(c.startswith("BTCUSDT:") for c in v.cancel_calls)  # no churn
+    assert len(v.stops_placed) <= 1
+
+
+def test_verified_repair_clears_episode_and_later_gets_fresh_attempt(
+    tmp_path: Path,
+) -> None:
+    h = _started_long(tmp_path)
+    v = h.venue
+    v.stops.clear()
+    _tick(h, 1)  # repair, verified by read-back
+    assert len(v.stops) == 1 and not h.kill.halted
+    first = v.stops[0].client_id
+    _tick(h, 2)  # covered: episode cleared
+    assert not h.kill.halted
+    v.stops.clear()
+    _tick(h, 3)  # a new episode gets a fresh single attempt
+    assert len(v.stops) == 1 and not h.kill.halted
+    # deterministic per (symbol, size, bar): the retry reuses the client id
+    assert v.stops[0].client_id == first
+
+
+def test_stop_vanishing_right_after_repair_escalates(tmp_path: Path) -> None:
+    h = _started_long(tmp_path)
+    v = h.venue
+    v.stops.clear()
+    _tick(h, 1)  # repaired and verified
+    placed = len(v.stops_placed)
+    v.stops.clear()  # e.g. accepted, then expired asynchronously
+    _tick(h, 2)
+    assert h.kill.halted and v.positions == {}
+    assert len(v.stops_placed) == placed  # no second repair in the episode
+
+
+def test_repair_client_id_depends_on_size_and_bar() -> None:
+    a = client_order_id("s", "BTCUSDT", LAST, "restop|0.5")
+    assert a != client_order_id("s", "BTCUSDT", LAST, "restop|0.3")
+    assert a != client_order_id("s", "BTCUSDT", LAST + STEP, "restop|0.5")

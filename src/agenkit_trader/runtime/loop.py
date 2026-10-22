@@ -26,9 +26,12 @@ Invariants (each is tested in ``tests/runtime/test_loop.py``):
   budget); size via ``size_position`` (floored to lot); after the fill a
   reduce-only STOP_MARKET is placed.
 * Stop coverage, EVERY cycle, for every owned position: the reduce-only
-  stops on the closing side must cover ``abs(qty)``. If not, a replacement
-  stop for the full position is placed (through the gate) BEFORE the old,
-  insufficient stops are cancelled; if that fails the kill switch flattens.
+  stops on the closing side must cover ``abs(qty)``. If not, ONE repair per
+  uncovered episode: a replacement for the full position is placed (through
+  the gate, client id deterministic per symbol/size/bar), read back, and only
+  if the read-back shows coverage are the old stops cancelled. If the repair
+  fails, the read-back is not covered, or the next check after a repair is
+  still not covered, the kill switch flattens and halts (no repair loop).
   A flat symbol with open orders has them cancelled (orphans). This also
   repairs the outcome of an ambiguous order (filled on the exchange but the
   response was lost) and of a partial exit.
@@ -95,6 +98,7 @@ from agenkit_trader.execution.venue import (
     AccountState,
     ClockSkewError,
     Fill,
+    OpenOrder,
     Order,
     OrderNotFilledError,
     Position,
@@ -351,19 +355,27 @@ def last_unreset_halt(log_path: Path) -> str | None:
         return None
     halt: str | None = None
     try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            rec = json.loads(line)
-            if rec.get("kind") in HALT_KINDS:
-                halt = str(rec.get("ts"))
-            elif rec.get("kind") == "runtime" and rec.get("result") == "halt_reset":
-                halt = None
-    except (OSError, ValueError, AttributeError) as exc:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
         raise StartupRefused(
             f"decision log {path} is unreadable ({exc}); cannot verify that no "
             "halt is outstanding"
         ) from exc
+    for n, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+            kind, result = rec.get("kind"), rec.get("result")
+        except (ValueError, AttributeError) as exc:
+            raise StartupRefused(
+                f"decision log {path} line {n} is malformed ({exc}); cannot "
+                "verify that no halt is outstanding"
+            ) from exc
+        if kind in HALT_KINDS:
+            halt = str(rec.get("ts"))
+        elif kind == "runtime" and result == "halt_reset":
+            halt = None
     return halt
 
 
@@ -453,6 +465,9 @@ class Runtime:
         self._may_write = False
         self._started = False
         self._data_now: datetime | None = None
+        # symbol -> position size at the repair attempt of the current
+        # uncovered episode (cleared once a check sees coverage or flat)
+        self._repaired: dict[str, float] = {}
 
     # ------------------------------------------------------------ helpers
 
@@ -650,16 +665,37 @@ class Runtime:
 
     # ------------------------------------------------------------ protection
 
-    def _ensure_protected(self, d: Deployment, now: datetime) -> bool:
-        """Every owned position must be covered by reduce-only stops on its
-        closing side; repair (place first, then cancel the old ones) or trip
-        the kill switch. Cancels orphan orders on a flat symbol."""
-        acct = self._call(self.venue.get_account)
-        pos = acct.positions.get(d.symbol)
+    def _coverage(self, d: Deployment) -> tuple[Position | None, list[OpenOrder]]:
+        """Read the position and the open orders on ``d.symbol``."""
+        pos = self._call(self.venue.get_account).positions.get(d.symbol)
         orders = [
             o for o in self._call(self.venue.get_open_orders) if o.symbol == d.symbol
         ]
+        return pos, orders
+
+    @staticmethod
+    def _stops_for(pos: Position, orders: list[OpenOrder]) -> list[OpenOrder]:
+        close_side = "sell" if pos.qty > 0 else "buy"
+        return [
+            o
+            for o in orders
+            if o.reduce_only and o.stop_price is not None and o.side == close_side
+        ]
+
+    @staticmethod
+    def _is_covered(pos: Position, stops: list[OpenOrder]) -> bool:
+        return sum(o.qty for o in stops) >= abs(pos.qty) * (1 - 1e-9)
+
+    def _ensure_protected(self, d: Deployment, now: datetime) -> bool:
+        """Every owned position must be covered by reduce-only stops on its
+        closing side. Repair is bounded: ONE attempt per uncovered episode
+        (place first, verify by read-back, only then cancel the old stops).
+        Escalate to the kill switch if the read-back right after the repair is
+        not covered, or if the next check after a repair is still not covered.
+        Cancels orphan orders on a flat symbol."""
+        pos, orders = self._coverage(d)
         if pos is None or pos.qty == 0:
+            self._repaired.pop(d.symbol, None)
             if orders:
                 self.log.write(
                     "orphan_orders",
@@ -669,25 +705,35 @@ class Runtime:
                 )
                 self._call(self.venue.cancel_open_orders, d.symbol)
             return True
-        close_side = "sell" if pos.qty > 0 else "buy"
-        stops = [
-            o
-            for o in orders
-            if o.reduce_only and o.stop_price is not None and o.side == close_side
-        ]
-        covered = sum(o.qty for o in stops)
+        stops = self._stops_for(pos, orders)
+        inputs = {"position": asdict(pos), "stops": [asdict(o) for o in stops]}
         need = abs(pos.qty)
-        if covered >= need * (1 - 1e-9):
+        if self._is_covered(pos, stops):
+            self._repaired.pop(d.symbol, None)  # episode over
             return True
-        self.log.write(
-            "stop_coverage",
-            {"position": asdict(pos), "stops": [asdict(o) for o in stops]},
-            {"covered": covered, "needed": need},
-            "repair",
-        )
+        covered = {"covered": sum(o.qty for o in stops), "needed": need}
+        if d.symbol in self._repaired:
+            # repaired last time and still not covered: never repair again
+            self.log.write("stop_coverage", inputs, covered, "escalate")
+            self.kill.trigger("stop_not_confirmed")
+            return False
+        self.log.write("stop_coverage", inputs, covered, "repair")
+        self._repaired[d.symbol] = need
         if not self._restore_stop(d, pos, now):
             return False
-        for o in stops:  # the new full-size stop is in place: drop the old ones
+        pos2, orders2 = self._coverage(d)
+        if pos2 is not None and pos2.qty != 0:
+            stops2 = self._stops_for(pos2, orders2)
+            if not self._is_covered(pos2, stops2):
+                self.log.write(
+                    "stop_coverage",
+                    {"position": asdict(pos2), "stops": [asdict(o) for o in stops2]},
+                    {"covered": sum(o.qty for o in stops2), "needed": abs(pos2.qty)},
+                    "escalate",
+                )
+                self.kill.trigger("stop_not_confirmed")
+                return False
+        for o in stops:  # the new stop is confirmed: drop the old ones
             # a failure is logged and counted; a leftover reduce-only stop is
             # harmless
             with contextlib.suppress(_VenueFailed):
@@ -717,7 +763,8 @@ class Runtime:
             bars.index[-1],
             self.clock(),  # inputs were read just now (see module docs)
             rules,
-            kind=f"restop|{pd.Timestamp(now).isoformat()}",
+            # deterministic per (symbol, size, bar): a retry is idempotent
+            kind=f"restop|{abs(pos.qty):.12g}",
         )
 
     # ------------------------------------------------------------ start

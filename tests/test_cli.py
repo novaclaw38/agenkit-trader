@@ -284,3 +284,27 @@ def test_reset_halt_requires_phrase_and_is_logged(
     assert last_unreset_halt(log) is None
     last = json.loads(log.read_text().splitlines()[-1])
     assert last["kind"] == "runtime" and last["result"] == "halt_reset"
+
+
+def test_reset_halt_on_truncated_log_explains_and_does_not_repair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from agenkit_trader.log import DecisionLog
+
+    log = tmp_path / "paper.jsonl"
+    DecisionLog(log).write(
+        "kill_switch", {"reason": "x"}, {"halted": True}, "flattened"
+    )
+    with log.open("a") as fh:
+        fh.write('{"kind": "runtime", "res')  # crash mid-append
+    before = log.read_bytes()
+    monkeypatch.setattr("builtins.input", lambda prompt: "RESUME")
+    rc = cli.main(
+        ["reset-halt", "--state", str(tmp_path / "s.json"), "--log", str(log)]
+    )
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert str(log) in err and "line 2" in err and "move" in err
+    assert log.read_bytes() == before  # never auto-repaired

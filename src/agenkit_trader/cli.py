@@ -158,7 +158,19 @@ def _reset_halt(a: argparse.Namespace) -> int:
     if phrase != RESUME_PHRASE:
         _err("reset-halt: confirmation phrase not given; halt kept")
         return 1
-    cleared = reset_halt(a.state, DecisionLog(a.log))
+    try:
+        cleared = reset_halt(a.state, DecisionLog(a.log))
+    except StartupRefused as exc:
+        _err(
+            f"reset-halt: {exc}\n"
+            f"Nothing was changed. To recover: inspect {a.log} and repair the "
+            "malformed line by hand (e.g. a line truncated by a crash), or move "
+            "the file aside (keep it for the record), then rerun "
+            "`agenkit reset-halt`. With the log moved aside, the next "
+            "`agenkit paper` start writes a fresh log; if the state file is also "
+            "missing it needs --init-state, which is logged."
+        )
+        return EXIT_REFUSED
     print("halt cleared" if cleared else "no halt was recorded")
     return 0
 
