@@ -142,7 +142,7 @@ Filled in after the research run and the Task 7/8 builds. Everything below is ei
 
 **In-memory repair state.** The stop-repair bookkeeping (one repair per uncovered episode) is held in memory only. A crash-looping process gets one repair attempt per restart. A persisted halt blocks restart once the kill switch has tripped, but repeated restarts without a halt are not bounded.
 
-**Regime labels are not reproducible at runtime.** Research labelled regimes with an expanding median over years of history; the runtime sees at most 1499 bars, and the labels differed on about 4% of bars. A deployment restricted to some regimes is therefore refused at start (fail closed). Only unrestricted deployments can run.
+**Regime labels are not reproducible at runtime.** Research labelled regimes with an expanding median over years of history; the runtime fetches at most 1499 bars. With the default 1000-bar window (`bars_limit: 1000`), the labels differed on about 4% of bars, as measured in the Task 7 review; the difference at other window lengths was not measured. A deployment restricted to some regimes is therefore refused at start (fail closed). Only unrestricted deployments can run.
 
 **Unowned positions.**
 - Ownership is per symbol: one deployed strategy per symbol.

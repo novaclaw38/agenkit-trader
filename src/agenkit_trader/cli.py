@@ -30,6 +30,8 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+import yaml
+
 from agenkit_trader.config import (
     load_live_config,
     load_risk_config,
@@ -200,6 +202,17 @@ class BadLiveConfig(UnlockError):
     pass
 
 
+def _yaml_where(exc: yaml.YAMLError) -> str:
+    """Error class and line/column only; never the message or a snippet."""
+    mark = getattr(exc, "problem_mark", None) or getattr(exc, "context_mark", None)
+    where = (
+        f" at line {mark.line + 1}, column {mark.column + 1}"
+        if mark is not None
+        else " (line unknown)"
+    )
+    return f"YAML parse error {type(exc).__name__}{where}; contents not shown"
+
+
 def _live(a: argparse.Namespace) -> int:
     """Human-only unlock check. Never places an order (not built)."""
     for name in ("live_config", "config", "log"):
@@ -222,6 +235,12 @@ def _live(a: argparse.Namespace) -> int:
         )
     try:
         live_cfg = load_live_config(a.live_config)
+    except yaml.YAMLError as exc:
+        # PyYAML messages quote the offending line, which could hold a secret
+        # pasted by mistake: report only the error class and the position.
+        return refuse(
+            BadLiveConfig(f"bad live config {a.live_config}: {_yaml_where(exc)}")
+        )
     except (OSError, ValueError, TypeError) as exc:
         return refuse(BadLiveConfig(f"bad live config {a.live_config}: {exc}"))
     try:

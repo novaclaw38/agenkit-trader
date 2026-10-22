@@ -33,6 +33,7 @@ from agenkit_trader.live_unlock import (
     LiveNotEnabled,
     PaperDaysTooLow,
     PaperStats,
+    PaperStatsMismatch,
     PaperTradesTooLow,
     PhraseMismatch,
     RiskConfigNotRecorded,
@@ -313,21 +314,33 @@ def _scenarios(
     write_paper_log(other, "0" * 64)
     bad = tmp_path / "bad.jsonl"
     write_paper_log(bad, file_sha256(risk_path), extra=["{truncated"])
+    short = tmp_path / "short.jsonl"
+    write_paper_log(short, file_sha256(risk_path), days=13.9)
+    few = tmp_path / "few.jsonl"
+    write_paper_log(few, file_sha256(risk_path), trades=29)
     return {
         "flag": (LiveConfig(), GOOD_ENV, STATS_OK, PHRASE, risk_path, good_log),
         "keys": (ENABLED, {}, STATS_OK, PHRASE, risk_path, good_log),
         "days": (
             ENABLED,
             GOOD_ENV,
-            PaperStats(13.9, 31),
+            paper_stats_from_log(short),
             PHRASE,
             risk_path,
-            good_log,
+            DecisionLog(short),
         ),
         "trades": (
             ENABLED,
             GOOD_ENV,
-            PaperStats(15.0, 29),
+            paper_stats_from_log(few),
+            PHRASE,
+            risk_path,
+            DecisionLog(few),
+        ),
+        "stats_mismatch": (
+            ENABLED,
+            GOOD_ENV,
+            PaperStats(100.0, 1000),
             PHRASE,
             risk_path,
             good_log,
@@ -348,6 +361,7 @@ EXPECTED = {
     "phrase": PhraseMismatch,
     "halted": LiveHalted,
     "malformed": DecisionLogMalformed,
+    "stats_mismatch": PaperStatsMismatch,
 }
 
 
@@ -446,7 +460,7 @@ def test_risk_hash_must_cover_every_trading_run(
 ) -> None:
     p = tmp_path / "p.jsonl"
     # first run traded under a different risk file, second under the current
-    write_paper_log(p, "f" * 64, trades=20)
+    write_paper_log(p, "f" * 64, trades=31)
     later = T0 + timedelta(days=20)
     extra = [
         _rec(
@@ -455,8 +469,9 @@ def test_risk_hash_must_cover_every_trading_run(
         _rec(later + timedelta(hours=1), "order", "filled"),
     ]
     p.write_text(p.read_text() + "\n".join(extra) + "\n")
+    st = paper_stats_from_log(p)
     with pytest.raises(RiskConfigNotRecorded):
-        verify(ENABLED, GOOD_ENV, STATS_OK, PHRASE, risk_path, DecisionLog(p))
+        verify(ENABLED, GOOD_ENV, st, PHRASE, risk_path, DecisionLog(p))
 
 
 def test_risk_hash_missing_from_log_is_refused(tmp_path: Path, risk_path: Path) -> None:
@@ -464,7 +479,9 @@ def test_risk_hash_missing_from_log_is_refused(tmp_path: Path, risk_path: Path) 
     write_paper_log(p, None)
     with pytest.raises(RiskConfigNotRecorded):
         verify(ENABLED, GOOD_ENV, STATS_OK, PHRASE, risk_path, DecisionLog(p))
-    p.write_text(_rec(T0, "order", "filled") + "\n")  # fills with no startup
+    # fills with no startup record at all
+    p.write_text("\n".join(p.read_text().splitlines()[1:]) + "\n")
+    assert paper_stats_from_log(p) == STATS_OK
     with pytest.raises(RiskConfigNotRecorded):
         verify(ENABLED, GOOD_ENV, STATS_OK, PHRASE, risk_path, DecisionLog(p))
 
@@ -956,3 +973,262 @@ def test_runs_that_filled_nothing_do_not_count_for_the_hash(
         ],
     )
     verify(ENABLED, GOOD_ENV, STATS_OK, PHRASE, risk_path, DecisionLog(p))
+
+
+# --------------------------------------------------------------------------
+# fix round 1: verify derives the paper record from the log itself
+
+
+def test_forged_paper_stats_are_refused_and_logged(
+    tmp_path: Path, risk_path: Path
+) -> None:
+    p = tmp_path / "p.jsonl"
+    write_paper_log(p, file_sha256(risk_path), trades=1)  # one fill only
+    log = DecisionLog(p)
+    with pytest.raises(PaperStatsMismatch):
+        verify(ENABLED, GOOD_ENV, PaperStats(100.0, 1000), PHRASE, risk_path, log)
+    recs = [r for r in records(log) if r["kind"] == "live_unlock"]
+    assert recs[-1]["result"] == "refused"
+    assert recs[-1]["output"]["reason"] == "PaperStatsMismatch"
+
+
+def test_honest_stats_from_the_same_log_pass(
+    good_log: DecisionLog, risk_path: Path
+) -> None:
+    st = paper_stats_from_log(good_log.path)
+    assert st == STATS_OK
+    assert isinstance(
+        verify(ENABLED, GOOD_ENV, st, PHRASE, risk_path, good_log), UnlockToken
+    )
+
+
+@pytest.mark.parametrize("stats", [PaperStats(15.0, 30), PaperStats(14.9, 31)])
+def test_understated_stats_are_also_a_mismatch(
+    stats: PaperStats, good_log: DecisionLog, risk_path: Path
+) -> None:
+    with pytest.raises(PaperStatsMismatch):
+        verify(ENABLED, GOOD_ENV, stats, PHRASE, risk_path, good_log)
+
+
+def test_non_paperstats_object_is_refused(
+    good_log: DecisionLog, risk_path: Path
+) -> None:
+    class Fake:
+        days = 15.0
+        trades = 31
+
+    with pytest.raises(PaperStatsMismatch):
+        verify(ENABLED, GOOD_ENV, Fake(), PHRASE, risk_path, good_log)  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------
+# fix round 1: a YAML parse error in live.yaml never echoes file content
+
+LEAK = "SECRETLEAK0123456789abcdef"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        f'enabled: false\napi_key: "abc{LEAK}xyz\n',
+        f"enabled: false\napi_key: 'abc{LEAK}xyz\n",
+        f"enabled: [false\n{LEAK}: {{\n",
+        f"\tapi_key: {LEAK}\n",
+    ],
+)
+def test_yaml_parse_error_does_not_echo_file_content(
+    content: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    risk_path: Path,
+    good_log: DecisionLog,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    live_cfg = tmp_path / "live.yaml"
+    live_cfg.write_text(content)
+    import yaml
+
+    with pytest.raises(yaml.YAMLError):  # really a parse error
+        yaml.safe_load(content)
+    out = FakeTTY()
+    monkeypatch.setattr("sys.stdin", FakeTTY(PHRASE + "\n"))
+    monkeypatch.setattr("sys.stdout", out)
+    rc = cli.main(
+        [
+            "live",
+            "--live-config",
+            str(live_cfg),
+            "--config",
+            str(risk_path),
+            "--log",
+            str(good_log.path),
+        ]
+    )
+    err = capsys.readouterr().err
+    assert rc != 0
+    text = good_log.path.read_text()
+    assert LEAK not in err and LEAK not in out.getvalue() and LEAK not in text
+    assert "abc" not in err
+    rec = [r for r in records(good_log) if r["kind"] == "live_unlock"][-1]
+    assert rec["result"] == "refused"
+    assert "line" in rec["output"]["message"]  # position is still reported
+
+
+# --------------------------------------------------------------------------
+# fix round 1: hardened static scanner for any route to verify / live code
+
+_LIVE_MOD = re.compile(r"[\w.]*(live_unlock|execution\.live)[\w.]*")
+_LIVE_ATTRS_OK = {"is_issued", "UnlockToken"}  # what execution/live.py may use
+
+
+def scan_live_refs(source: str, rel: str) -> list[str]:
+    """Violations: any route to ``verify`` or to the live modules outside
+    ``cli._live``'s direct ``verify(...)`` call. ``rel`` is the path relative
+    to the package (e.g. ``cli.py``)."""
+    tree = ast.parse(source)
+    owner = _enclosing_functions(tree)
+    called = {
+        id(n.func)
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
+    bad: list[str] = []
+
+    def where(n: ast.AST) -> str:
+        return f"{rel}:{getattr(n, 'lineno', '?')}"
+
+    for n in ast.walk(tree):
+        in_live = rel == "cli.py" and owner.get(n) == "_live"
+        if isinstance(n, ast.Name) and n.id == "verify":
+            if not (in_live and id(n) in called and isinstance(n.ctx, ast.Load)):
+                bad.append(f"{where(n)} name 'verify' outside a direct call in _live")
+        elif isinstance(n, ast.Name) and n.id in ("__import__", "import_module"):
+            bad.append(f"{where(n)} dynamic import {n.id}")
+        elif isinstance(n, ast.Attribute):
+            if n.attr == "verify":
+                bad.append(f"{where(n)} attribute .verify")
+            if n.attr in ("import_module", "__import__"):
+                bad.append(f"{where(n)} dynamic import .{n.attr}")
+            if (
+                isinstance(n.value, ast.Name)
+                and n.value.id == "live_unlock"
+                and n.attr not in _LIVE_ATTRS_OK
+            ):
+                bad.append(f"{where(n)} live_unlock.{n.attr}")
+        elif isinstance(n, ast.Constant) and isinstance(n.value, str):
+            v = n.value
+            if v == "verify":
+                bad.append(f"{where(n)} string 'verify'")
+            m = _LIVE_MOD.fullmatch(v)
+            if m and not (rel == "live_unlock.py" and v == "live_unlock"):
+                bad.append(f"{where(n)} string naming a live module: {v!r}")
+        elif isinstance(n, ast.Import | ast.ImportFrom):
+            mods = [a.name for a in n.names] if isinstance(n, ast.Import) else []
+            if any(m.split(".")[0] == "importlib" for m in mods):
+                bad.append(f"{where(n)} imports importlib")
+            if isinstance(n, ast.ImportFrom):
+                if (n.module or "").split(".")[0] == "importlib":
+                    bad.append(f"{where(n)} imports from importlib")
+                for a in n.names:
+                    if a.name == "verify" and (
+                        rel != "cli.py"
+                        or a.asname is not None
+                        or n.module != "agenkit_trader.live_unlock"
+                    ):
+                        bad.append(f"{where(n)} imports verify")
+                    if "live" in a.name.split("_") and a.asname is not None:
+                        bad.append(f"{where(n)} aliases {a.name}")
+            for a in n.names if isinstance(n, ast.Import) else []:
+                if _LIVE_MOD.fullmatch(a.name):
+                    bad.append(f"{where(n)} import {a.name}")
+    return bad
+
+
+def test_scanner_finds_nothing_in_src_and_scripts() -> None:
+    files = [(f, f.relative_to(SRC).as_posix()) for f in _src_files()]
+    files += [(f, "scripts/" + f.name) for f in sorted((ROOT / "scripts").glob("*.py"))]
+    found = [v for f, rel in files for v in scan_live_refs(f.read_text(), rel)]
+    assert found == []
+
+
+_LIVE_OK = """
+from agenkit_trader.live_unlock import verify
+def _live(a):
+    tok = verify(1, 2, 3, 4, 5, 6)
+    return tok
+"""
+
+EVASIONS = {
+    "getattr": (
+        "runtime/loop.py",
+        "from agenkit_trader import live_unlock\ngetattr(live_unlock, 'verify')(1)\n",
+    ),
+    "getattr_in_cli": (
+        "cli.py",
+        "import agenkit_trader.live_unlock as m\n"
+        "def _paper(a):\n    getattr(m, 'verify')(a)\n",
+    ),
+    "importlib": (
+        "runtime/loop.py",
+        "import importlib\n"
+        "importlib.import_module('agenkit_trader.live_unlock').verify(1)\n",
+    ),
+    "importlib_from": (
+        "cli.py",
+        "from importlib import import_module\ndef _paper(a):\n    import_module('x')\n",
+    ),
+    "dunder_import": ("runtime/loop.py", "__import__('agenkit_trader.live_unlock')\n"),
+    "sys_modules": (
+        "cli.py",
+        "import sys\ndef _paper(a):\n    sys.modules['agenkit_trader.live_unlock']\n",
+    ),
+    "alias_import": (
+        "cli.py",
+        "from agenkit_trader.live_unlock import verify as v\n"
+        "def _paper(a):\n    v(a)\n",
+    ),
+    "rebind_module": ("cli.py", _LIVE_OK + "check = verify\n"),
+    "rebind_in_live": (
+        "cli.py",
+        "from agenkit_trader.live_unlock import verify\n"
+        "def _live(a):\n    v = verify\n    return v(a)\n",
+    ),
+    "pass_as_arg": (
+        "cli.py",
+        "from agenkit_trader.live_unlock import verify\n"
+        "def _live(a):\n    return map(verify, a)\n",
+    ),
+    "call_outside_live": (
+        "cli.py",
+        "from agenkit_trader.live_unlock import verify\n"
+        "def _paper(a):\n    verify(a)\n",
+    ),
+    "attribute_call": (
+        "execution/live.py",
+        "from agenkit_trader import live_unlock\nlive_unlock.verify(1)\n",
+    ),
+    "module_alias_attr": (
+        "execution/live.py",
+        "from agenkit_trader import live_unlock as lu\nlu.verify(1)\n",
+    ),
+    "live_attr_other": (
+        "execution/live.py",
+        "from agenkit_trader import live_unlock\nlive_unlock._verify(1)\n",
+    ),
+    "import_in_runtime": (
+        "runtime/loop.py",
+        "from agenkit_trader.live_unlock import verify\n",
+    ),
+    "import_live_module": ("runtime/loop.py", "import agenkit_trader.execution.live\n"),
+    "globals_lookup": ("cli.py", "def _paper(a):\n    globals()['verify'](a)\n"),
+}
+
+
+def test_scanner_accepts_the_real_pattern() -> None:
+    assert scan_live_refs(_LIVE_OK, "cli.py") == []
+
+
+@pytest.mark.parametrize("name", sorted(EVASIONS))
+def test_scanner_flags_evasions(name: str) -> None:
+    rel, src = EVASIONS[name]
+    assert scan_live_refs(src, rel), name

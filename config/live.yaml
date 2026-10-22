@@ -1,5 +1,5 @@
 # Live-trading gate (spec section 7). Edited by the human only: no code in this
-# repository writes this file, and the agent/runtime has no way to change it.
+# repository (including the paper runtime) writes this file.
 # Live order placement is NOT implemented in this build: `agenkit live` only
 # checks the unlock conditions. See docs/GOING_LIVE.md.
 #

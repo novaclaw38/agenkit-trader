@@ -15,7 +15,9 @@ API keys are read last, only once everything else has passed):
    (``LiveNotEnabled``).
 2. The decision log is readable and well formed (``DecisionLogMalformed``)
    and has no halt without a later ``runtime/halt_reset`` (``LiveHalted``).
-3. Paper record (from the decision log, never the state file) spans at least
+3. The ``paper_stats`` passed in equal the paper record ``verify`` derives
+   itself from the decision log it reads (``PaperStatsMismatch``), and that
+   record (from the decision log, never the state file) spans at least
    ``min_paper_days`` (``PaperDaysTooLow``) with at least
    ``min_paper_trades`` filled orders (``PaperTradesTooLow``).
 4. Every paper run that filled an order recorded, at its startup, the
@@ -85,6 +87,10 @@ class PaperDaysTooLow(UnlockError):
 
 
 class PaperTradesTooLow(UnlockError):
+    pass
+
+
+class PaperStatsMismatch(UnlockError):
     pass
 
 
@@ -330,8 +336,16 @@ def _verify(
             f"the decision log {log.path} records a halt at {halt} with no later "
             "reset; inspect it and run `agenkit reset-halt` first"
         )
-    if not isinstance(paper_stats, PaperStats):
-        raise PaperDaysTooLow("no paper record was supplied")
+    # The paper record is derived HERE from the log just read; the caller's
+    # figures must match it exactly (they come from the same log).
+    from_log = _stats(recs)
+    if not isinstance(paper_stats, PaperStats) or paper_stats != from_log:
+        raise PaperStatsMismatch(
+            f"the paper record supplied ({getattr(paper_stats, 'days', None)!r} "
+            f"days, {getattr(paper_stats, 'trades', None)!r} orders) does not match "
+            f"the decision log {log.path} ({from_log.days:.2f} days, "
+            f"{from_log.trades} filled orders); rerun `agenkit live`"
+        )
     if paper_stats.days < live_cfg.min_paper_days:
         raise PaperDaysTooLow(
             f"paper record spans {paper_stats.days:.2f} days; "
