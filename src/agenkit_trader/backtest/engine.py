@@ -80,12 +80,15 @@ class BacktestResult:
     """``equity`` is indexed like ``bars`` (``equity[0] == equity0``);
     ``trades`` has ``entry_time``, ``exit_time`` (end of last held bar),
     ``position``, ``n_bars`` and ``ret``. ``ruined`` is True if equity hit
-    zero (it then stays at 0 and no further trades occur); it never raises."""
+    zero (it then stays at 0 and no further trades occur); it never raises.
+    ``skipped_entries`` counts entries the runtime-policy simulator
+    (``runtime_policy.py``) did not open; always 0 for ``run_backtest``."""
 
     equity: pd.Series
     trades: pd.DataFrame
     stats: Stats
     ruined: bool = False
+    skipped_entries: int = 0
 
 
 def _bar_step(bars: pd.DataFrame) -> pd.Timedelta:
