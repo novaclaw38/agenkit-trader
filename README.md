@@ -96,11 +96,26 @@ A research pass does NOT validate the runtime's sizing or stop policy.
   (roughly 0.4x equity notional on ETH 1h; an illustrative estimate, not a
   measurement). After a stop-out it does not re-enter until the signal makes
   a fresh transition.
-- The backtest simulates neither the disaster stop nor that re-entry rule.
+- The committed run's backtest simulated neither the disaster stop nor that
+  re-entry rule.
 
-So paper P&L is not the P&L of what was validated. Making the backtest
-simulate runtime sizing and stops would be a new research design and a new
-counted run; that is the user's decision.
+So paper P&L is not the P&L of what was validated.
+
+A runtime-policy simulator now exists (`backtest/runtime_policy.py`,
+`run_backtest_runtime`). It mirrors the runtime: sign of the signal, entries
+only on a signal transition, 1% risk at the 3 x ATR(14) stop, gate
+rejections skipped, constant quantity, an intrabar exchange stop filled at
+the stop or at a gapping open, no re-entry until a fresh transition. A parity
+test runs it and the real runtime loop on the same synthetic bars and checks
+they make the same trades. `scripts/run_research.py --policy` selects it;
+the default for the NEXT research run is `runtime`, and the report records
+the policy. The COMMITTED run used the research policy; its numbers are
+unchanged and say nothing about the runtime policy.
+
+Even the runtime policy cannot validate real exchange stop fills, testnet
+fills and fees, or how a 1h-ATR stop interacts with live slippage; it also
+does not simulate the daily-loss/drawdown kill switch. A new run is a new
+counted trial; whether to make one is the user's decision.
 
 ## Development
 

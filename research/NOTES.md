@@ -67,3 +67,19 @@ The committed report was not regenerated.
 
 The runtime does not trade what research validated. A research pass does NOT validate the runtime's sizing or stop policy. Research backtests each signal's fractional position (e.g. trend_breakout's vol_cap scaling up to 1x equity) with no stop-outs; the paper runtime keeps only the sign of the signal, sizes for 1% risk at a 3 x ATR(14) exchange-side disaster stop (roughly 0.4x equity notional on ETH 1h, an illustrative estimate) and does not re-enter after a stop-out until a fresh signal transition. The backtest simulates neither the stop nor that rule. Making it do so would be a new research design and a new counted run, for the user to decide.
 Paper results therefore measure an unvalidated sizing/stop policy.
+
+## Runtime-policy simulator (added after the committed run)
+
+The committed run used the research policy (fractional positions, no stops);
+everything above describes that run and stays true. Since then a
+runtime-policy simulator exists (`backtest/runtime_policy.py`): sign of the
+signal, entries only on a signal transition, 1% risk at the 3 x ATR(14)
+stop, entries the risk gate would reject are skipped, constant quantity, an
+intrabar exchange stop (filled at the stop, or at the open when a bar gaps
+through it), no re-entry until a fresh transition. A parity test checks it
+against the real runtime loop on synthetic bars. `scripts/run_research.py`
+now takes `--policy {research,runtime}`; the default for the next run is
+`runtime`, and REPORT.md/REPORT.json record the policy. No run has been made
+with it, so there are no numbers for it. It cannot validate real exchange
+stop fills, testnet fills or the interaction of a 1h-ATR stop with live
+slippage, and it does not simulate the kill switch.

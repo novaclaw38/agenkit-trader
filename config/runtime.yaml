@@ -13,9 +13,10 @@
 # stop-outs. This runtime keeps only the signal's sign, sizes for 1% risk at
 # this 3 x ATR(14) stop (roughly 0.4x equity notional on ETH 1h, an
 # illustrative estimate) and does not re-enter after a stop-out until a fresh
-# signal transition. The backtest simulates neither. A research pass does NOT
-# validate this sizing/stop policy; simulating it would be a new research
-# design and a new counted run, for the user to decide.
+# signal transition. The committed research run simulated neither, so it does
+# NOT validate this sizing/stop policy. backtest/runtime_policy.py now
+# simulates it (scripts/run_research.py --policy runtime, the default for the
+# next run, which is a new counted run for the user to decide).
 stop_atr_mult: 3.0            # PROPOSED, user to confirm
 atr_window: 14                # PROPOSED, user to confirm (bars)
 bars_limit: 1000              # closed-bar history fetched per cycle (max 1499)
