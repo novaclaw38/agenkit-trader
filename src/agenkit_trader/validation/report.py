@@ -11,6 +11,11 @@
   ``{name, symbol, interval, params, allowed_regimes}`` for passing verdicts
   only; an empty list when nothing passes, so a stale file never survives.
 
+Policy. Verdicts produced under the runtime-sizing policy
+(``policy="runtime"``) are labelled: the Markdown gets a ``Simulation
+policy:`` line and each JSON entry a ``policy`` key. Research-policy verdicts
+(the committed run) are written exactly as before, without either.
+
 JSON never contains ``NaN``/``Infinity``: a non-finite float ``x`` stored
 under key ``k`` is written as ``k: null`` plus ``k_nonfinite: "inf" | "-inf" |
 "nan"``.
@@ -83,6 +88,13 @@ def _cell(text: str) -> str:
 
 
 def evidence(v: Verdict) -> dict[str, Any]:
+    out = _evidence(v)
+    if v.policy != "research":
+        out = {"policy": v.policy, **out}
+    return out
+
+
+def _evidence(v: Verdict) -> dict[str, Any]:
     return {
         "name": v.name,
         "edge": v.edge,
@@ -124,6 +136,16 @@ def write_report(verdicts: list[Verdict], path: Path) -> None:
         "| " + " | ".join(COLUMNS) + " |",
         "|" + "---|" * len(COLUMNS),
     ]
+    policies = sorted({v.policy for v in verdicts} - {"research"})
+    if policies:
+        note = [
+            f"Simulation policy: {', '.join(policies)} (sign of the signal, 1% "
+            "risk at the runtime's ATR stop, intrabar exchange stop, no "
+            "re-entry without a fresh signal transition; see "
+            "backtest/runtime_policy.py).",
+            "",
+        ]
+        lines[4:4] = note
     for v in verdicts:
         h = v.holdout
         verdict = "PASS" if v.passed else "REJECT: " + "; ".join(v.reasons)

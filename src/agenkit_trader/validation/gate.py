@@ -32,6 +32,13 @@ Protocol (statistical honesty first):
    ``allowed_regimes`` contains only it: the runtime must stay out (flat) in
    the other. No regime with edge is a rejection.
 
+Policy. ``policy`` selects what is simulated (``validation/sweep.py``):
+``"research"`` (default, the committed run) or ``"runtime"`` (what the paper
+runtime trades). The sweep, the train re-run, the hold-out, the cost
+re-run and the regime split all use the same policy. Under ``"runtime"`` the
+hold-out simulation gets the train bars as ATR warm-up history (only bars
+before each decision are used).
+
 Win rate is gated by ``min_win_rate``, a sanity floor (Sharpe and profit
 factor are the binding checks).
 """
@@ -46,7 +53,8 @@ import numpy as np
 import pandas as pd
 
 from agenkit_trader.backtest.costs import CostModel
-from agenkit_trader.backtest.engine import BacktestResult, run_backtest
+from agenkit_trader.backtest.engine import BacktestResult
+from agenkit_trader.backtest.runtime_policy import RuntimePolicy
 from agenkit_trader.backtest.stats import Stats, compute_stats
 from agenkit_trader.config import GateConfig
 from agenkit_trader.data.lookahead import LookaheadError, assert_no_lookahead
@@ -57,8 +65,10 @@ from agenkit_trader.validation.split import split_by_time
 from agenkit_trader.validation.sweep import (
     SweepResult,
     backtest_params,
+    check_policy,
     grid_points,
     neighbourhood_sweep,
+    simulate,
     to_positions,
 )
 from agenkit_trader.validation.trials import TrialCounter, deflated_sharpe_pvalue
@@ -91,6 +101,7 @@ class Verdict:
     n_trials: int
     sweep: SweepResult
     ruined: bool
+    policy: str = "research"
 
 
 def passes_cost_check(stats: Stats, *, ruined: bool) -> bool:
@@ -210,6 +221,8 @@ def evaluate(
     funding: pd.Series | None = None,
     equity0: float = 1000.0,
     n_trials: int | None = None,
+    policy: str = "research",
+    runtime_policy: RuntimePolicy | None = None,
 ) -> Verdict:
     """Run the full validation protocol (module docstring) on one strategy.
 
@@ -219,6 +232,7 @@ def evaluate(
     when omitted, this strategy's grid points are added here and the new
     cumulative total is used.
     """
+    check_policy(policy)
     train, hold = split_by_time(bars, gate_cfg.holdout_frac)
     full = pd.concat([train, hold])
     grid = strategy.param_grid
@@ -237,9 +251,21 @@ def evaluate(
         tolerance=gate_cfg.neighbour_tolerance,
         funding=tr_fund,
         equity0=equity0,
+        policy=policy,
+        runtime_policy=runtime_policy,
     )
     params = sweep.best_params
-    train_res = backtest_params(strategy, train, aux, params, costs, tr_fund, equity0)
+    train_res = backtest_params(
+        strategy,
+        train,
+        aux,
+        params,
+        costs,
+        tr_fund,
+        equity0,
+        policy=policy,
+        runtime_policy=runtime_policy,
+    )
 
     reasons: list[str] = []
     full_aux = {k: v.reindex(full.index) for k, v in aux.items()}
@@ -255,9 +281,21 @@ def evaluate(
 
     # --- the single hold-out evaluation ---
     pos = sig(full).loc[hold.index]
-    ho = run_backtest(hold, pos, costs, ho_fund, equity0)
-    c2 = run_backtest(
-        hold, pos, costs.scaled(gate_cfg.cost_multiplier), ho_fund, equity0
+    # runtime policy: the train bars are ATR history for the hold-out
+    warm = train if policy == "runtime" else None
+    c2_costs = costs.scaled(gate_cfg.cost_multiplier)
+    ho, c2 = (
+        simulate(
+            hold,
+            pos,
+            c,
+            ho_fund,
+            equity0,
+            policy=policy,
+            runtime_policy=runtime_policy,
+            warmup=warm,
+        )
+        for c in (costs, c2_costs)
     )
     st = ho.stats
 
@@ -320,6 +358,7 @@ def evaluate(
         n_trials=n_trials,
         sweep=sweep,
         ruined=ho.ruined,
+        policy=policy,
     )
 
 
@@ -342,6 +381,8 @@ def evaluate_candidates(
     counter: TrialCounter,
     *,
     equity0: float = 1000.0,
+    policy: str = "research",
+    runtime_policy: RuntimePolicy | None = None,
 ) -> list[Verdict]:
     """Evaluate every candidate against the same, final trial count.
 
@@ -367,6 +408,8 @@ def evaluate_candidates(
             funding=c.funding,
             equity0=equity0,
             n_trials=n_trials,
+            policy=policy,
+            runtime_policy=runtime_policy,
         )
         for c in candidates
     ]

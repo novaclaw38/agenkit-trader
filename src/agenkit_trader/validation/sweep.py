@@ -10,6 +10,12 @@ neighbour loses more than ``tolerance`` of the performance). A grid with a
 single setting can never be stable: it cannot show graceful degradation.
 
 Callers must pass only the data the selection may see (the train segment).
+
+Policy. ``policy="research"`` (default) backtests the signal with
+``run_backtest`` (fraction of equity, no stops). ``policy="runtime"`` reduces
+the signal to its sign and simulates what the paper runtime trades with
+``run_backtest_runtime`` (1% risk at an ATR stop, intrabar exchange stop,
+no re-entry without a transition), configured by ``runtime_policy``.
 """
 
 from __future__ import annotations
@@ -24,6 +30,7 @@ import pandas as pd
 
 from agenkit_trader.backtest.costs import CostModel
 from agenkit_trader.backtest.engine import BacktestResult, run_backtest
+from agenkit_trader.backtest.runtime_policy import RuntimePolicy, run_backtest_runtime
 from agenkit_trader.strategies.base import Strategy
 
 
@@ -61,6 +68,44 @@ def to_positions(sig: pd.Series, index: pd.DatetimeIndex) -> pd.Series:
     return vals
 
 
+POLICIES = ("research", "runtime")
+
+
+def check_policy(policy: str) -> None:
+    if policy not in POLICIES:
+        raise ValueError(f"unknown policy {policy!r}; expected one of {POLICIES}")
+
+
+def simulate(
+    bars: pd.DataFrame,
+    positions: pd.Series,
+    costs: CostModel,
+    funding: pd.Series | None,
+    equity0: float,
+    *,
+    policy: str = "research",
+    runtime_policy: RuntimePolicy | None = None,
+    warmup: pd.DataFrame | None = None,
+) -> BacktestResult:
+    """Backtest ``positions`` under ``policy`` (see the module docstring).
+    ``warmup`` (runtime policy only) is earlier history for the ATR."""
+    check_policy(policy)
+    if policy == "research":
+        return run_backtest(bars, positions, costs, funding, equity0)
+    rp = runtime_policy or RuntimePolicy()
+    return run_backtest_runtime(
+        bars,
+        positions,
+        costs,
+        funding,
+        equity0,
+        rp.risk,
+        rp.runtime,
+        rp.rules,
+        warmup=warmup,
+    )
+
+
 def backtest_params(
     strategy: Strategy,
     bars: pd.DataFrame,
@@ -69,13 +114,24 @@ def backtest_params(
     costs: CostModel,
     funding: pd.Series | None = None,
     equity0: float = 1000.0,
+    *,
+    policy: str = "research",
+    runtime_policy: RuntimePolicy | None = None,
 ) -> BacktestResult:
     """Signal on exactly ``bars`` (aux restricted to its index) and backtest."""
     sub_aux = {k: v.reindex(bars.index) for k, v in aux.items()}
     pos = to_positions(
         strategy.signal(bars, params, sub_aux), pd.DatetimeIndex(bars.index)
     )
-    return run_backtest(bars, pos, costs, funding, equity0)
+    return simulate(
+        bars,
+        pos,
+        costs,
+        funding,
+        equity0,
+        policy=policy,
+        runtime_policy=runtime_policy,
+    )
 
 
 def score_of(res: BacktestResult) -> float:
@@ -106,15 +162,28 @@ def neighbourhood_sweep(
     tolerance: float,
     funding: pd.Series | None = None,
     equity0: float = 1000.0,
+    policy: str = "research",
+    runtime_policy: RuntimePolicy | None = None,
 ) -> SweepResult:
     """Backtest every grid point on ``bars`` and judge the best's neighbourhood."""
     if not 0 < tolerance <= 1:
         raise ValueError("tolerance must be in (0, 1]")
+    check_policy(policy)
     aux = aux or {}
     points = grid_points(grid)
     rows = []
     for p in points:
-        res = backtest_params(strategy, bars, aux, p, costs, funding, equity0)
+        res = backtest_params(
+            strategy,
+            bars,
+            aux,
+            p,
+            costs,
+            funding,
+            equity0,
+            policy=policy,
+            runtime_policy=runtime_policy,
+        )
         rows.append(
             {
                 **p,
