@@ -1,0 +1,59 @@
+{
+ "serverTime": 1792501242918,
+ "symbols": [
+  {
+   "symbol": "BTCUSDT",
+   "filters": [
+    {
+     "minPrice": "261.10",
+     "tickSize": "0.10",
+     "filterType": "PRICE_FILTER",
+     "maxPrice": "809484"
+    },
+    {
+     "filterType": "LOT_SIZE",
+     "minQty": "0.0001",
+     "maxQty": "1000",
+     "stepSize": "0.0001"
+    },
+    {
+     "maxQty": "120",
+     "stepSize": "0.0001",
+     "filterType": "MARKET_LOT_SIZE",
+     "minQty": "0.0001"
+    },
+    {
+     "filterType": "MIN_NOTIONAL",
+     "notional": "50"
+    }
+   ]
+  },
+  {
+   "symbol": "ETHUSDT",
+   "filters": [
+    {
+     "filterType": "PRICE_FILTER",
+     "maxPrice": "306177",
+     "minPrice": "39.86",
+     "tickSize": "0.01"
+    },
+    {
+     "minQty": "0.001",
+     "filterType": "LOT_SIZE",
+     "maxQty": "10000",
+     "stepSize": "0.001"
+    },
+    {
+     "filterType": "MARKET_LOT_SIZE",
+     "maxQty": "10000",
+     "stepSize": "0.001",
+     "minQty": "0.001"
+    },
+    {
+     "filterType": "MIN_NOTIONAL",
+     "notional": "20"
+    }
+   ]
+  }
+ ]
+}

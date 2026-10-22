@@ -1,8 +1,9 @@
 """Run every candidate strategy x symbol through the validation gate.
 
-``--policy`` selects what is simulated: ``runtime`` (default: what the paper
-runtime trades, sizing and stops from config/risk.yaml and
-config/runtime.yaml) or ``research`` (the policy of the committed run).
+``--policy`` (required) selects what is simulated: ``runtime`` (what the
+paper runtime trades; sizing, stops and kill-switch limits from
+config/risk.yaml and config/runtime.yaml, lot/tick/min-notional from
+config/symbol_rules.yaml) or ``research`` (the committed run's policy).
 
 Writes research/REPORT.md (+ evidence), research/trials.json (via the trial
 counter, never reset) and deployed.json (written last). Data is cached under
@@ -24,6 +25,7 @@ from agenkit_trader.config import (
     load_gate_config,
     load_risk_config,
     load_runtime_config,
+    load_symbol_rules,
 )
 from agenkit_trader.data.align import align_asof
 from agenkit_trader.data.archive import load_funding, load_klines
@@ -45,6 +47,22 @@ def load_costs(path: Path) -> CostModel:
         half_spread_bps=float(d["half_spread_bps"]),
         slippage_bps=float(d["slippage_bps"]),
     )
+
+
+def runtime_policies(symbols: list[str]) -> dict[str, RuntimePolicy]:
+    """Per-symbol runtime policy: risk.yaml, runtime.yaml and the static
+    rules in symbol_rules.yaml (exits if a symbol has none: quantities and
+    stops must be rounded like the runtime's)."""
+    risk = load_risk_config(ROOT / "config" / "risk.yaml")
+    rt = load_runtime_config(ROOT / "config" / "runtime.yaml")
+    rules = load_symbol_rules(ROOT / "config" / "symbol_rules.yaml")
+    missing = [s for s in symbols if s not in rules]
+    if missing:
+        raise SystemExit(
+            f"no trading rules for {missing} in config/symbol_rules.yaml "
+            "(needed by --policy runtime)"
+        )
+    return {s: RuntimePolicy(risk, rt, rules[s]) for s in symbols}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -73,10 +91,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--policy",
         choices=["research", "runtime"],
-        default="runtime",
-        help="what to simulate: 'runtime' = the paper runtime's sizing and "
-        "stops (default), 'research' = the committed run's fractional "
-        "positions without stops (default: %(default)s)",
+        required=True,
+        help="REQUIRED (a counted run must choose deliberately). 'runtime' = "
+        "what the paper runtime trades: sign of the signal, 1%% risk at a "
+        "3 x ATR(14) exchange-side stop, constant quantity, no re-entry "
+        "after a stop-out, 3%%/10%% kill-switch halt; 'research' = the "
+        "committed run's policy: +-1x equity rebalanced every bar, no stops",
     )
     return ap
 
@@ -88,6 +108,7 @@ def main(argv: list[str] | None = None) -> None:
     gate_cfg = load_gate_config(ROOT / "config" / "gate.yaml")
     costs = load_costs(ROOT / "config" / "research.yaml")
     counter = TrialCounter(a.out.parent / "trials.json")
+    policies = runtime_policies(a.symbols) if a.policy == "runtime" else {}
     candidates: list[Candidate] = []
     for sym in a.symbols:
         bars = load_klines(sym, a.interval, start, end, a.cache)
@@ -96,24 +117,21 @@ def main(argv: list[str] | None = None) -> None:
         print(f"{sym}: {len(bars)} bars {bars.index[0]} .. {bars.index[-1]}")
         for strat in REGISTRY.values():
             candidates.append(
-                Candidate(strat, bars, aux, sym, a.interval, funding=funding)
+                Candidate(
+                    strat,
+                    bars,
+                    aux,
+                    sym,
+                    a.interval,
+                    funding=funding,
+                    runtime_policy=policies.get(sym),
+                )
             )
     # every candidate's grid points are counted BEFORE any is evaluated, and
     # all are tested against that final total (order-independent p-values)
-    # symbol lot/tick rules are not available offline: quantities and stops
-    # are simulated unrounded
-    runtime_policy = RuntimePolicy(
-        load_risk_config(ROOT / "config" / "risk.yaml"),
-        load_runtime_config(ROOT / "config" / "runtime.yaml"),
-    )
     print(f"simulation policy: {a.policy}")
     verdicts = evaluate_candidates(
-        candidates,
-        costs,
-        gate_cfg,
-        counter,
-        policy=a.policy,
-        runtime_policy=runtime_policy,
+        candidates, costs, gate_cfg, counter, policy=a.policy
     )
     for v in verdicts:
         print(f"  {v.symbol} {v.name}: {'PASS' if v.passed else 'REJECT'}")

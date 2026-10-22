@@ -9,6 +9,8 @@ from typing import Any
 
 import yaml
 
+from agenkit_trader.execution.venue import SymbolRules
+
 
 class ConfigError(ValueError):
     """Config rejected. The message names only our own field names and value
@@ -234,3 +236,32 @@ def load_live_config(path: Path) -> LiveConfig:
     data = _load_mapping(path, LiveConfig)
     _check_keys(LiveConfig, data, path)
     return LiveConfig(**data)
+
+
+def load_symbol_rules(path: Path) -> dict[str, SymbolRules]:
+    """``config/symbol_rules.yaml``: ``{SYMBOL: {tick, lot, min_notional}}``
+    with tick and lot finite and > 0, min_notional finite and >= 0."""
+    data = _load_mapping(path)
+    keys = {"tick", "lot", "min_notional"}
+    out: dict[str, SymbolRules] = {}
+    for sym, r in data.items():
+        if not isinstance(sym, str) or not isinstance(r, dict) or set(r) != keys:
+            raise ConfigError(
+                f"{path}: each symbol needs exactly the keys {sorted(keys)}"
+            )
+        vals = {k: r[k] for k in keys}
+        if not all(
+            isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(v)
+            for v in vals.values()
+        ):
+            raise ConfigError(f"{path}: {sym}: rules must be finite numbers")
+        if not (vals["tick"] > 0 and vals["lot"] > 0 and vals["min_notional"] >= 0):
+            raise ConfigError(
+                f"{path}: {sym}: need tick > 0, lot > 0, min_notional >= 0"
+            )
+        out[sym] = SymbolRules(
+            tick=float(vals["tick"]),
+            lot=float(vals["lot"]),
+            min_notional=float(vals["min_notional"]),
+        )
+    return out

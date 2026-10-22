@@ -1,0 +1,16 @@
+# Static per-symbol trading rules used by research (scripts/run_research.py
+# --policy runtime) to round quantities and stop prices like the runtime.
+# Fetched 2026-10-22 from the UNSIGNED public Binance Futures TESTNET endpoint
+#   GET https://testnet.binancefuture.com/fapi/v1/exchangeInfo
+# parsed exactly as BinanceTestnetVenue.symbol_rules does: tick =
+# PRICE_FILTER.tickSize, lot = MARKET_LOT_SIZE.stepSize (else LOT_SIZE),
+# min_notional = MIN_NOTIONAL.notional. The paper runtime re-reads the live
+# values every cycle; these are a snapshot and can drift.
+BTCUSDT:
+  tick: 0.1
+  lot: 0.0001
+  min_notional: 50.0
+ETHUSDT:
+  tick: 0.01
+  lot: 0.001
+  min_notional: 20.0
