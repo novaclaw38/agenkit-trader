@@ -174,3 +174,22 @@ new symbols in `config/symbol_rules.yaml`. Nothing was counted: the trial
 counter is still 60, `research/REPORT.*` and `deployed.json` are untouched, and
 no round-2 results exist. The run will add 90 trials (30 + 60) for a total of
 150.
+
+## Incident: stray public-data download during test development (2026-10-22)
+
+While writing tests for `--plan`, a test stub patched the wrong namespace
+(`runpy.run_path` returns a copy of the globals), so a test ran the real
+research main and fetched public bulk archive data from data.binance.vision
+(about 20:06-20:07): BTCUSDT and ETHUSDT 4h monthly kline zips, and BNBUSDT
+monthly funding zips (2021-01..2022-09, 21 zips + CHECKSUMs) with an empty
+BNBUSDT klines directory. This corrects the earlier, incomplete disclosure
+(which named only BTC/ETH 4h klines). Nothing was parsed into an evaluation,
+backtested or counted, no result was seen, and research/trials.json is still
+{"total": 60}. Deleted: all `data/cache/**/4h` files and the BNBUSDT cache
+directories (funding and klines). Kept: BTC/ETH 1h kline and funding caches
+(round-1 data; funding is interval independent). The test now stubs
+`load_klines`/`load_funding` in the namespace `main` really uses, and
+tests/conftest.py has an autouse guard that fails any test attempting a real
+network fetch (archive `_http_get`, `httpx.get`, real httpx transports).
+Procedural clarifications are in
+docs/superpowers/specs/2026-10-22-preregistration-round2-addendum.md.

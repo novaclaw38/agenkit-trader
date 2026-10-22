@@ -279,6 +279,14 @@ def main(argv: list[str] | None = None) -> None:
             }
         )
     a = ap.parse_args(argv)
+    if cfg:  # the config is the pre-registered round: flags may not diverge
+        for k in ("symbols", "interval", "start", "end", "out", "trials"):
+            want = ROOT / cfg[k] if k in ("out", "trials") else cfg[k]
+            if k in cfg and str(getattr(a, k)) != str(want) and getattr(a, k) != want:
+                raise SystemExit(
+                    f"--{k} {getattr(a, k)} conflicts with the config's {want}; "
+                    "edit/replace the config (and say so in research/NOTES.md)"
+                )
     a.start, a.end = str(a.start), str(a.end)  # YAML may have parsed dates
     start, end = date.fromisoformat(a.start), date.fromisoformat(a.end)
     if a.trials is None:

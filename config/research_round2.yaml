@@ -11,12 +11,12 @@ end: 2026-10-01          # end-exclusive: through 2026-09-30
 out: research/round2/REPORT.md      # evidence + deployed.json land beside it
 trials: research/trials.json        # SHARED counter: continues from round 1
 strategies:
-  trend_breakout:                   # code and default grid unchanged
+  trend_breakout_r2:                # trend_breakout signal, own name (deployable grid)
     grid: {lookback: [42, 84, 168], vol_cap: [1.5]}
   trend_funding_filter:
     grid: {lookback: [42, 84, 168], thr: [0.0003, 0.0006], vol_cap: [1.5]}
 # Checked before any data is loaded or any trial is counted (and by --plan).
 expect:
-  per_strategy: {trend_breakout: 30, trend_funding_filter: 60}
+  per_strategy: {trend_breakout_r2: 30, trend_funding_filter: 60}
   new_trials: 90
   total_after: 150

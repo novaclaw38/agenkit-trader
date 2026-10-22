@@ -58,7 +58,7 @@ def test_round2_config_matches_the_preregistration() -> None:
     assert str(d["start"]) == "2021-01-01" and str(d["end"]) == "2026-10-01"
     assert d["out"] == "research/round2/REPORT.md"
     assert d["trials"] == "research/trials.json"  # shared counter
-    assert d["strategies"]["trend_breakout"]["grid"] == {
+    assert d["strategies"]["trend_breakout_r2"]["grid"] == {
         "lookback": [42, 84, 168],
         "vol_cap": [1.5],
     }
@@ -68,7 +68,7 @@ def test_round2_config_matches_the_preregistration() -> None:
         "vol_cap": [1.5],
     }
     assert d["expect"] == {
-        "per_strategy": {"trend_breakout": 30, "trend_funding_filter": 60},
+        "per_strategy": {"trend_breakout_r2": 30, "trend_funding_filter": 60},
         "new_trials": 90,
         "total_after": 150,
     }
@@ -85,7 +85,7 @@ def test_plan_prints_and_verifies_90(
     out = capsys.readouterr().out
     for s in SYMS:
         assert s in out
-    assert "trend_breakout" in out and "trend_funding_filter" in out
+    assert "trend_breakout_r2" in out and "trend_funding_filter" in out
     assert "3 grid points x 10 symbols = 30 trials" in out
     assert "6 grid points x 10 symbols = 60 trials" in out
     assert "trials that WOULD be added: 90" in out
@@ -109,6 +109,13 @@ def _config_with(tmp_path: Path, edit: Any) -> Path:
     return p
 
 
+def _cfg_trials(tmp_path: Path, trials: Path) -> Path:
+    def edit(d: dict[str, Any]) -> None:
+        d["trials"] = str(trials)
+
+    return _config_with(tmp_path, edit)
+
+
 def test_plan_fails_when_counts_differ(
     capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
@@ -130,7 +137,7 @@ def test_real_run_refused_before_data_or_counting_on_total_mismatch(
     trials.write_text(json.dumps({"total": 61}) + "\n")  # 61 + 90 != 150
     with pytest.raises(SystemExit, match="plan check failed"):
         _mod()["main"](
-            ["--config", str(CFG), "--policy", "runtime", "--trials", str(trials)]
+            ["--config", str(_cfg_trials(tmp_path, trials)), "--policy", "runtime"]
         )
     assert json.loads(trials.read_text()) == {"total": 61}
 
@@ -140,7 +147,7 @@ def test_real_run_with_right_total_proceeds_to_data_loading(tmp_path: Path) -> N
     trials.write_text(json.dumps({"total": 60}) + "\n")
     with pytest.raises(Touched):  # got past the plan check: first data load
         _mod()["main"](
-            ["--config", str(CFG), "--policy", "runtime", "--trials", str(trials)]
+            ["--config", str(_cfg_trials(tmp_path, trials)), "--policy", "runtime"]
         )
     assert json.loads(trials.read_text()) == {"total": 60}  # nothing counted yet
 
@@ -237,3 +244,52 @@ def test_archive_addresses_every_round2_symbol(
     assert "monthly/klines/AVAXUSDT/4h/AVAXUSDT-4h-2021-01.zip" in seen
     assert "monthly/fundingRate/LTCUSDT/LTCUSDT-fundingRate-2021-01.zip" in seen
     assert len(seen) == 20
+
+
+def test_r2_strategy_is_trend_breakout_on_the_round2_grid_and_deployable() -> None:
+    import numpy as np
+    import pandas as pd
+
+    from agenkit_trader.regime import REGIMES
+    from agenkit_trader.runtime.loop import Deployment, StartupRefused
+    from agenkit_trader.runtime.loop import validate_deployments as vd
+
+    r2, tb = REGISTRY["trend_breakout_r2"], REGISTRY["trend_breakout"]
+    assert r2.param_grid == {"lookback": [42, 84, 168], "vol_cap": [1.5]}
+    assert tb.param_grid == {"lookback": [48, 96, 168, 336], "vol_cap": [1.0, 1.5, 2.0]}
+    rng = np.random.default_rng(0)
+    c = pd.Series(100 * np.exp(np.cumsum(rng.normal(0, 0.01, 1500))))
+    c.index = pd.date_range("2022-01-01", periods=1500, freq="4h", tz="UTC")
+    b = pd.DataFrame(
+        {"open": c, "high": c * 1.002, "low": c * 0.998, "close": c, "volume": 1.0}
+    )
+    p = {"lookback": 42, "vol_cap": 1.5}
+    pd.testing.assert_series_equal(r2.signal(b, p, {}), tb.signal(b, p, {}))
+
+    def dep(name: str, lb: int) -> Deployment:
+        return Deployment(
+            name, "BTCUSDT", "4h", {"lookback": lb, "vol_cap": 1.5}, list(REGIMES)
+        )
+
+    vd([dep("trend_breakout_r2", 42)], REGISTRY)
+    vd([dep("trend_breakout_r2", 168)], REGISTRY)
+    with pytest.raises(StartupRefused, match="grid"):
+        vd([dep("trend_breakout", 42)], REGISTRY)
+    vd([dep("trend_breakout", 168)], REGISTRY)  # round 1 grid unchanged
+
+
+def test_config_flags_that_conflict_with_the_config_are_refused() -> None:
+    m = _mod()
+    base = ["--config", str(CFG), "--policy", "runtime", "--plan"]
+    for extra in (
+        ["--interval", "1h"],
+        ["--start", "2022-01-01"],
+        ["--end", "2026-01-01"],
+        ["--symbols", "BTCUSDT"],
+        ["--out", "x/REPORT.md"],
+        ["--trials", "x/trials.json"],
+    ):
+        with pytest.raises(SystemExit, match="conflicts with"):
+            m["main"]([*base, *extra])
+    # restating the config's own value is fine
+    m["main"]([*base, "--interval", "4h"])

@@ -14,6 +14,7 @@ from agenkit_trader.strategies.base import Strategy
 from agenkit_trader.strategies.funding_reversion import FundingReversion
 from agenkit_trader.strategies.short_reversion import ShortReversion
 from agenkit_trader.strategies.trend_breakout import TrendBreakout
+from agenkit_trader.strategies.trend_breakout_r2 import TrendBreakoutR2
 from agenkit_trader.strategies.trend_funding_filter import TrendFundingFilter
 
 
@@ -48,6 +49,7 @@ STRATS: list[Strategy] = [
     TrendBreakout(),
     ShortReversion(),
     TrendFundingFilter(),
+    TrendBreakoutR2(),
 ]
 
 
