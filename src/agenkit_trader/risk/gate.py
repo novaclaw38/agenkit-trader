@@ -8,6 +8,20 @@ Orders that only reduce an existing position (same symbol, opposite side,
 size not exceeding the position) must still pass the sanity, kill-switch and
 stale-data checks, but are exempt from the risk-per-trade, daily-loss,
 drawdown and leverage limits so a flatten can never be blocked by them.
+
+Check order (first failing check gives the reason):
+ 1. order sanity: invalid_order
+ 2. state / clock sanity: invalid_state
+ 3. halted
+ 4. stale_data
+ 5. rules_unavailable
+ 6. below_lot (qty under one lot)
+ 7. qty_not_lot_multiple (not within sizing.LOT_REL_TOL of whole lots)
+ 8. below_min_notional
+ -- reduce-only orders are allowed here --
+ 9. no_stop, stop_wrong_side
+10. daily_loss, drawdown, risk_per_trade, leverage, symbol_notional
+So a non-multiple quantity can never reach the stop or limit checks.
 """
 
 from __future__ import annotations

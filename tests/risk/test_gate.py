@@ -407,11 +407,20 @@ def test_allowed_orders_never_exceed_limits(**kw: object) -> None:
 def test_jittered_non_multiples_rejected(jitter: float, **kw: object) -> None:
     o, s, qty, _ = _scenario(**kw)  # type: ignore[arg-type]
     jq = qty * (1 + jitter)
-    r = jq / LOT
-    if jq < LOT or abs(r - round(r)) < 1e-6:
-        return  # below one lot, or jitter landed on another whole lot
-    event("checked")
+    if jq < LOT:
+        return  # below one lot is BELOW_LOT, an earlier check
     d = check(replace(o, qty=jq), s)
+    # "Whole number of lots" is defined by the documented relative tolerance
+    # (sizing.LOT_REL_TOL = 1e-12 of qty), computed independently here. At
+    # large lot counts a jitter can land within it; such a qty IS a multiple
+    # and must instead pass every limit on its exact value.
+    n = round(jq / LOT)
+    if n >= 1 and abs(n * LOT - jq) <= 1e-12 * jq:
+        event("jitter landed on a whole lot")
+        if d.allowed:
+            _assert_within_limits(replace(o, qty=jq), s, d)
+        return
+    event("checked")
     assert not d.allowed
     assert d.reason == Reason.QTY_NOT_LOT_MULTIPLE
 
@@ -442,3 +451,24 @@ def test_boundary_exactly_at_budget_allowed_one_lot_over_rejected() -> None:
     assert at.allowed, at.reason
     over = check(order(qty=0.011, price_ref=10_000.0, stop_price=9_000.0))
     assert over.reason == Reason.RISK_PER_TRADE
+
+
+def test_regression_jitter_within_rel_tol_of_whole_lot() -> None:
+    # Hypothesis falsifying example (seeds 6, 7): equity=99999.9375,
+    # price=10.0, dist_frac=0.001, offset=0, side=buy, jitter=1e-06.
+    # jq = 100000.036999937 is 100000037 lots minus 6.3e-5 lot: within
+    # 1e-12 relative, so it is a whole-lot qty by definition, and the gate
+    # correctly rejects it on the exact qty as risk_per_trade.
+    o, s, q, _ = _scenario(99999.9375, 10.0, 0.001, 0, "buy", 0, 0.0, 0.0, 0.0)
+    jq = q * (1 + 1e-06)
+    assert is_lot_multiple(jq, LOT)
+    d = check(replace(o, qty=jq), s)
+    assert (d.allowed, d.reason) == (False, Reason.RISK_PER_TRADE)
+    # Just outside the tolerance at the same scale: lot-multiple rejection
+    # fires before any risk check.
+    off = 100000037 * LOT + 0.5 * LOT
+    d2 = check(replace(o, qty=off), s)
+    assert (d2.allowed, d2.reason) == (False, Reason.QTY_NOT_LOT_MULTIPLE)
+    off2 = 100000037 * LOT * (1 + 5e-12)
+    d3 = check(replace(o, qty=off2), s)
+    assert (d3.allowed, d3.reason) == (False, Reason.QTY_NOT_LOT_MULTIPLE)
