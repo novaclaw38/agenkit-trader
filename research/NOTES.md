@@ -212,3 +212,16 @@ BNBUSDT, DOGEUSDT, ADAUSDT, LINKUSDT, AVAXUSDT (7 symbols). Expected counts:
 trend_breakout_r2 3x7 = 21, trend_funding_filter 6x7 = 42, new 63, total after
 123. Nothing else in the frozen design changes. The dropped symbols were
 removed only because of loader errors, not because of any performance.
+
+## 2026-10-22 round 2 result (one pass, as pre-registered, 7 symbols after the data-gap drop)
+
+`run_research.py --config config/research_round2.yaml --policy runtime`
+completed: 63 new trials counted, `research/trials.json` total 123, and
+**0 of 14 candidates passed** the gate. `research/round2/deployed.json` is `[]`,
+so nothing is eligible for paper trading. Full per-candidate evidence is in
+`research/round2/REPORT.md` / `REPORT.json`. No rule, grid, symbol or threshold
+was changed after seeing results. Closest case: ETHUSDT (hold-out Sharpe 1.05,
+28 trades) was rejected for fewer than 30 trades and a trial-adjusted
+p-value of 0.891; the identical-looking BTCUSDT result had hold-out Sharpe
+0.24. These are hold-out results of the best parameter set chosen on the
+train period, and they carry no claim of future profit.
