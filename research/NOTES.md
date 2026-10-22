@@ -193,3 +193,22 @@ tests/conftest.py has an autouse guard that fails any test attempting a real
 network fetch (archive `_http_get`, `httpx.get`, real httpx transports).
 Procedural clarifications are in
 docs/superpowers/specs/2026-10-22-preregistration-round2-addendum.md.
+
+## 2026-10-22 round 2: symbol drop before any evaluation (addendum rule applied)
+
+The first counted-run attempt (`--policy runtime`, config as frozen) loaded
+data symbol by symbol and stopped on SOLUSDT with `DataGapError` (4h bars:
+expected 04:00 after 2022-02-25 20:00 UTC, next bar 2022-03-01 00:00 UTC). It
+crashed in the loading phase: no trial was counted (`research/trials.json`
+still {"total": 60}), no backtest or evaluation ran and no result was seen.
+
+A data-only load check (loaders only, no strategy code) over the remaining
+symbols found the same gap for XRPUSDT and LTCUSDT; DOGEUSDT, ADAUSDT,
+LINKUSDT and AVAXUSDT load cleanly (12594 bars, 6297 funding records), and
+BTCUSDT, ETHUSDT and BNBUSDT loaded in the first attempt. Per the addendum
+symbol-drop rule, SOLUSDT, XRPUSDT and LTCUSDT are DROPPED (not repaired, not
+substituted) before any evaluation. The universe is now BTCUSDT, ETHUSDT,
+BNBUSDT, DOGEUSDT, ADAUSDT, LINKUSDT, AVAXUSDT (7 symbols). Expected counts:
+trend_breakout_r2 3x7 = 21, trend_funding_filter 6x7 = 42, new 63, total after
+123. Nothing else in the frozen design changes. The dropped symbols were
+removed only because of loader errors, not because of any performance.
