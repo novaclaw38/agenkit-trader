@@ -1,0 +1,1033 @@
+[
+  {
+    "name": "funding_reversion",
+    "edge": "extreme funding marks crowded leveraged positioning that tends to unwind",
+    "symbol": "BTCUSDT",
+    "interval": "1h",
+    "params": {
+      "entry": 0.0003,
+      "max_hold": 24
+    },
+    "passed": false,
+    "reasons": [
+      "hold-out has zero trades",
+      "hold-out net return 0.0000 <= 0 (no positive expectancy)",
+      "hold-out Sharpe 0.000 < min 0.5 (annualised)",
+      "hold-out profit factor 0.000 < min 1.2",
+      "hold-out win rate 0.000 < min 0.35",
+      "parameter sweep unstable: neighbour score -0.114 < 0.186 (50% below best 0.371)",
+      "cost sensitivity: at 2.0x costs net return 0.0000, profit factor 0.000 (need return > 0 and PF > 1)",
+      "trial-adjusted p-value 0.9358 > max 0.05 (deflated Sharpe, n_trials=9)",
+      "no regime shows an edge on the hold-out: regime range excluded: 0 trades < min 10, net return 0.0000 <= 0, Sharpe 0.000 <= 0; regime trend excluded: 0 trades < min 10, net return 0.0000 <= 0, Sharpe 0.000 <= 0"
+    ],
+    "flags": [],
+    "allowed_regimes": [],
+    "restricted_to": null,
+    "pvalue": 0.9358422454099535,
+    "n_trials": 9,
+    "ruined": false,
+    "train": {
+      "sharpe": 0.371206577185438,
+      "max_drawdown": 0.3096355628397762,
+      "win_rate": 0.6190476190476191,
+      "profit_factor": 1.306940605926002,
+      "n_trades": 63,
+      "total_return": 0.20798229002997304
+    },
+    "holdout": {
+      "sharpe": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "profit_factor": 0.0,
+      "n_trades": 0,
+      "total_return": 0.0
+    },
+    "cost_2x": {
+      "sharpe": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "profit_factor": 0.0,
+      "n_trades": 0,
+      "total_return": 0.0
+    },
+    "regimes": {
+      "range": {
+        "sharpe": 0.0,
+        "max_drawdown": 0.0,
+        "win_rate": 0.0,
+        "profit_factor": 0.0,
+        "n_trades": 0,
+        "total_return": 0.0
+      },
+      "trend": {
+        "sharpe": 0.0,
+        "max_drawdown": 0.0,
+        "win_rate": 0.0,
+        "profit_factor": 0.0,
+        "n_trades": 0,
+        "total_return": 0.0
+      }
+    },
+    "sweep": {
+      "stable": false,
+      "reason": "neighbour score -0.114 < 0.186 (50% below best 0.371)",
+      "best_score": 0.371206577185438,
+      "neighbour_scores": [
+        -0.11427985587810471,
+        0.2370257679553944
+      ],
+      "table": [
+        {
+          "entry": 0.0003,
+          "max_hold": 24,
+          "sharpe": 0.371206577185438,
+          "total_return": 0.20798229002997304,
+          "n_trades": 63,
+          "ruined": false,
+          "score": 0.371206577185438
+        },
+        {
+          "entry": 0.0003,
+          "max_hold": 48,
+          "sharpe": 0.2370257679553944,
+          "total_return": 0.11281372465433881,
+          "n_trades": 63,
+          "ruined": false,
+          "score": 0.2370257679553944
+        },
+        {
+          "entry": 0.0003,
+          "max_hold": 72,
+          "sharpe": 0.2774372906898393,
+          "total_return": 0.14964226981696593,
+          "n_trades": 63,
+          "ruined": false,
+          "score": 0.2774372906898393
+        },
+        {
+          "entry": 0.0005,
+          "max_hold": 24,
+          "sharpe": -0.11427985587810471,
+          "total_return": -0.08984369231942813,
+          "n_trades": 36,
+          "ruined": false,
+          "score": -0.11427985587810471
+        },
+        {
+          "entry": 0.0005,
+          "max_hold": 48,
+          "sharpe": -0.02689195186611865,
+          "total_return": -0.05341174535477511,
+          "n_trades": 36,
+          "ruined": false,
+          "score": -0.02689195186611865
+        },
+        {
+          "entry": 0.0005,
+          "max_hold": 72,
+          "sharpe": -0.06980156266968357,
+          "total_return": -0.08139337972744887,
+          "n_trades": 36,
+          "ruined": false,
+          "score": -0.06980156266968357
+        },
+        {
+          "entry": 0.001,
+          "max_hold": 24,
+          "sharpe": 0.08081877772242146,
+          "total_return": 0.01333939629762737,
+          "n_trades": 13,
+          "ruined": false,
+          "score": 0.08081877772242146
+        },
+        {
+          "entry": 0.001,
+          "max_hold": 48,
+          "sharpe": -0.2218329363574801,
+          "total_return": -0.10875330493080015,
+          "n_trades": 13,
+          "ruined": false,
+          "score": -0.2218329363574801
+        },
+        {
+          "entry": 0.001,
+          "max_hold": 72,
+          "sharpe": -0.17377514333203453,
+          "total_return": -0.09274928579165864,
+          "n_trades": 13,
+          "ruined": false,
+          "score": -0.17377514333203453
+        }
+      ]
+    }
+  },
+  {
+    "name": "trend_breakout",
+    "edge": "slow trend persistence: closes beyond the prior range tend to continue",
+    "symbol": "BTCUSDT",
+    "interval": "1h",
+    "params": {
+      "lookback": 168,
+      "vol_cap": 2.0
+    },
+    "passed": false,
+    "reasons": [
+      "hold-out net return -0.1044 <= 0 (no positive expectancy)",
+      "hold-out Sharpe 0.019 < min 0.5 (annualised)",
+      "hold-out max drawdown 0.406 > max 0.25",
+      "hold-out profit factor 1.002 < min 1.2",
+      "hold-out win rate 0.333 < min 0.35",
+      "parameter sweep unstable: neighbour score -0.261 < 0.214 (50% below best 0.427)",
+      "cost sensitivity: at 2.0x costs net return -0.1865, profit factor 0.931 (need return > 0 and PF > 1)",
+      "trial-adjusted p-value 0.9711 > max 0.05 (deflated Sharpe, n_trials=21)",
+      "no regime shows an edge on the hold-out: regime range excluded: 5 trades < min 10; regime trend excluded: net return -0.1593 <= 0, Sharpe -0.288 <= 0"
+    ],
+    "flags": [],
+    "allowed_regimes": [],
+    "restricted_to": null,
+    "pvalue": 0.971060139432354,
+    "n_trials": 21,
+    "ruined": false,
+    "train": {
+      "sharpe": 0.42742993814510244,
+      "max_drawdown": 0.5848885136337447,
+      "win_rate": 0.36585365853658536,
+      "profit_factor": 1.2392949146881007,
+      "n_trades": 123,
+      "total_return": 0.41791144334488495
+    },
+    "holdout": {
+      "sharpe": 0.01944645915230671,
+      "max_drawdown": 0.4057499117222345,
+      "win_rate": 0.3333333333333333,
+      "profit_factor": 1.001656282597739,
+      "n_trades": 60,
+      "total_return": -0.10439930923120155
+    },
+    "cost_2x": {
+      "sharpe": -0.1278774313142013,
+      "max_drawdown": 0.4461854079205615,
+      "win_rate": 0.3,
+      "profit_factor": 0.9311953210350089,
+      "n_trades": 60,
+      "total_return": -0.18645217355676236
+    },
+    "regimes": {
+      "range": {
+        "sharpe": 0.38818665914882555,
+        "max_drawdown": 0.2854750891575121,
+        "win_rate": 0.0,
+        "profit_factor": 0.0,
+        "n_trades": 5,
+        "total_return": 0.06534251644476297
+      },
+      "trend": {
+        "sharpe": -0.2880650037091837,
+        "max_drawdown": 0.32796941945271973,
+        "win_rate": 0.36363636363636365,
+        "profit_factor": 1.0936392740343917,
+        "n_trades": 55,
+        "total_return": -0.1593307533077939
+      }
+    },
+    "sweep": {
+      "stable": false,
+      "reason": "neighbour score -0.261 < 0.214 (50% below best 0.427)",
+      "best_score": 0.42742993814510244,
+      "neighbour_scores": [
+        0.37880336487099314,
+        -0.26105812120397914,
+        0.3571885949877147
+      ],
+      "table": [
+        {
+          "lookback": 48,
+          "vol_cap": 1.0,
+          "sharpe": -0.4755224767811867,
+          "total_return": -0.7392798054675149,
+          "n_trades": 383,
+          "ruined": false,
+          "score": -0.4755224767811867
+        },
+        {
+          "lookback": 48,
+          "vol_cap": 1.5,
+          "sharpe": -0.622390425372093,
+          "total_return": -0.8375226291595496,
+          "n_trades": 431,
+          "ruined": false,
+          "score": -0.622390425372093
+        },
+        {
+          "lookback": 48,
+          "vol_cap": 2.0,
+          "sharpe": -0.6105131953217922,
+          "total_return": -0.835961226069618,
+          "n_trades": 435,
+          "ruined": false,
+          "score": -0.6105131953217922
+        },
+        {
+          "lookback": 96,
+          "vol_cap": 1.0,
+          "sharpe": 0.02711592256261313,
+          "total_return": -0.34240123134427425,
+          "n_trades": 193,
+          "ruined": false,
+          "score": 0.02711592256261313
+        },
+        {
+          "lookback": 96,
+          "vol_cap": 1.5,
+          "sharpe": 0.2364940242267568,
+          "total_return": -0.054737965566638125,
+          "n_trades": 216,
+          "ruined": false,
+          "score": 0.2364940242267568
+        },
+        {
+          "lookback": 96,
+          "vol_cap": 2.0,
+          "sharpe": 0.37880336487099314,
+          "total_return": 0.2749970170088891,
+          "n_trades": 217,
+          "ruined": false,
+          "score": 0.37880336487099314
+        },
+        {
+          "lookback": 168,
+          "vol_cap": 1.0,
+          "sharpe": 0.05735057720570828,
+          "total_return": -0.2901968143335216,
+          "n_trades": 109,
+          "ruined": false,
+          "score": 0.05735057720570828
+        },
+        {
+          "lookback": 168,
+          "vol_cap": 1.5,
+          "sharpe": 0.3571885949877147,
+          "total_return": 0.22521980686678122,
+          "n_trades": 122,
+          "ruined": false,
+          "score": 0.3571885949877147
+        },
+        {
+          "lookback": 168,
+          "vol_cap": 2.0,
+          "sharpe": 0.42742993814510244,
+          "total_return": 0.41791144334488495,
+          "n_trades": 123,
+          "ruined": false,
+          "score": 0.42742993814510244
+        },
+        {
+          "lookback": 336,
+          "vol_cap": 1.0,
+          "sharpe": -0.2884234871737034,
+          "total_return": -0.6238343970775425,
+          "n_trades": 62,
+          "ruined": false,
+          "score": -0.2884234871737034
+        },
+        {
+          "lookback": 336,
+          "vol_cap": 1.5,
+          "sharpe": -0.2543066316693335,
+          "total_return": -0.6665401818989485,
+          "n_trades": 70,
+          "ruined": false,
+          "score": -0.2543066316693335
+        },
+        {
+          "lookback": 336,
+          "vol_cap": 2.0,
+          "sharpe": -0.26105812120397914,
+          "total_return": -0.6790125710422601,
+          "n_trades": 72,
+          "ruined": false,
+          "score": -0.26105812120397914
+        }
+      ]
+    }
+  },
+  {
+    "name": "short_reversion",
+    "edge": "liquidity-driven overshoots partly retrace in range-bound markets",
+    "symbol": "BTCUSDT",
+    "interval": "1h",
+    "params": {
+      "z_entry": 3.0,
+      "er_max": 0.4
+    },
+    "passed": false,
+    "reasons": [
+      "hold-out net return -0.1294 <= 0 (no positive expectancy)",
+      "hold-out Sharpe -0.318 < min 0.5 (annualised)",
+      "hold-out max drawdown 0.300 > max 0.25",
+      "hold-out profit factor 0.882 < min 1.2",
+      "parameter sweep unstable: best score -1.212 is not positive",
+      "cost sensitivity: at 2.0x costs net return -0.2666, profit factor 0.728 (need return > 0 and PF > 1)",
+      "trial-adjusted p-value 0.9935 > max 0.05 (deflated Sharpe, n_trials=30)"
+    ],
+    "flags": [
+      "regime trend excluded: net return -0.1985 <= 0, Sharpe -0.939 <= 0",
+      "edge only in range regime: restricted to it (stay out otherwise)"
+    ],
+    "allowed_regimes": [
+      "range"
+    ],
+    "restricted_to": "range",
+    "pvalue": 0.9935455125618604,
+    "n_trials": 30,
+    "ruined": false,
+    "train": {
+      "sharpe": -1.211906557599049,
+      "max_drawdown": 0.8032753455267869,
+      "win_rate": 0.41338582677165353,
+      "profit_factor": 0.6197437168040644,
+      "n_trades": 254,
+      "total_return": -0.7644159922529536
+    },
+    "holdout": {
+      "sharpe": -0.31764252880287774,
+      "max_drawdown": 0.29967361780554114,
+      "win_rate": 0.5327102803738317,
+      "profit_factor": 0.8817706374154638,
+      "n_trades": 107,
+      "total_return": -0.12940898467761508
+    },
+    "cost_2x": {
+      "sharpe": -0.8259497127174673,
+      "max_drawdown": 0.39662344015318096,
+      "win_rate": 0.4766355140186916,
+      "profit_factor": 0.727920299140685,
+      "n_trades": 107,
+      "total_return": -0.2666135364075457
+    },
+    "regimes": {
+      "range": {
+        "sharpe": 0.8001621201089464,
+        "max_drawdown": 0.08648934855856816,
+        "win_rate": 0.6896551724137931,
+        "profit_factor": 2.0032441481517376,
+        "n_trades": 29,
+        "total_return": 0.08617421836667893
+      },
+      "trend": {
+        "sharpe": -0.9388430560299601,
+        "max_drawdown": 0.33019490547309394,
+        "win_rate": 0.47435897435897434,
+        "profit_factor": 0.7226447936286394,
+        "n_trades": 78,
+        "total_return": -0.19847939621368682
+      }
+    },
+    "sweep": {
+      "stable": false,
+      "reason": "best score -1.212 is not positive",
+      "best_score": -1.211906557599049,
+      "neighbour_scores": [
+        -1.4982751881816632,
+        -1.2635510288845349
+      ],
+      "table": [
+        {
+          "z_entry": 2.0,
+          "er_max": 0.2,
+          "sharpe": -2.0460519932068584,
+          "total_return": -0.9252220820914414,
+          "n_trades": 492,
+          "ruined": false,
+          "score": -2.0460519932068584
+        },
+        {
+          "z_entry": 2.0,
+          "er_max": 0.3,
+          "sharpe": -1.935672368717683,
+          "total_return": -0.9471413710572627,
+          "n_trades": 616,
+          "ruined": false,
+          "score": -1.935672368717683
+        },
+        {
+          "z_entry": 2.0,
+          "er_max": 0.4,
+          "sharpe": -2.1576952591418928,
+          "total_return": -0.9677638675380994,
+          "n_trades": 667,
+          "ruined": false,
+          "score": -2.1576952591418928
+        },
+        {
+          "z_entry": 2.5,
+          "er_max": 0.2,
+          "sharpe": -1.444630346603963,
+          "total_return": -0.8206803904282616,
+          "n_trades": 314,
+          "ruined": false,
+          "score": -1.444630346603963
+        },
+        {
+          "z_entry": 2.5,
+          "er_max": 0.3,
+          "sharpe": -1.3101773107033161,
+          "total_return": -0.826684448886132,
+          "n_trades": 380,
+          "ruined": false,
+          "score": -1.3101773107033161
+        },
+        {
+          "z_entry": 2.5,
+          "er_max": 0.4,
+          "sharpe": -1.4982751881816632,
+          "total_return": -0.8788688217969266,
+          "n_trades": 417,
+          "ruined": false,
+          "score": -1.4982751881816632
+        },
+        {
+          "z_entry": 3.0,
+          "er_max": 0.2,
+          "sharpe": -1.218758933291288,
+          "total_return": -0.6972495458512742,
+          "n_trades": 179,
+          "ruined": false,
+          "score": -1.218758933291288
+        },
+        {
+          "z_entry": 3.0,
+          "er_max": 0.3,
+          "sharpe": -1.2635510288845349,
+          "total_return": -0.7510887066940102,
+          "n_trades": 227,
+          "ruined": false,
+          "score": -1.2635510288845349
+        },
+        {
+          "z_entry": 3.0,
+          "er_max": 0.4,
+          "sharpe": -1.211906557599049,
+          "total_return": -0.7644159922529536,
+          "n_trades": 254,
+          "ruined": false,
+          "score": -1.211906557599049
+        }
+      ]
+    }
+  },
+  {
+    "name": "funding_reversion",
+    "edge": "extreme funding marks crowded leveraged positioning that tends to unwind",
+    "symbol": "ETHUSDT",
+    "interval": "1h",
+    "params": {
+      "entry": 0.0003,
+      "max_hold": 24
+    },
+    "passed": false,
+    "reasons": [
+      "hold-out trades 1 < min 30",
+      "hold-out Sharpe 0.043 < min 0.5 (annualised)",
+      "parameter sweep unstable: neighbour score -0.076 < 0.122 (50% below best 0.244)",
+      "cost sensitivity: at 2.0x costs net return -0.0006, profit factor 0.000 (need return > 0 and PF > 1)",
+      "trial-adjusted p-value 0.9845 > max 0.05 (deflated Sharpe, n_trials=39)",
+      "no regime shows an edge on the hold-out: regime range excluded: 0 trades < min 10, net return 0.0000 <= 0, Sharpe 0.000 <= 0; regime trend excluded: 1 trades < min 10"
+    ],
+    "flags": [],
+    "allowed_regimes": [],
+    "restricted_to": null,
+    "pvalue": 0.9844513403934549,
+    "n_trials": 39,
+    "ruined": false,
+    "train": {
+      "sharpe": 0.24438589127788196,
+      "max_drawdown": 0.2912950778677492,
+      "win_rate": 0.5,
+      "profit_factor": 1.1695099073207464,
+      "n_trades": 80,
+      "total_return": 0.12905514329530576
+    },
+    "holdout": {
+      "sharpe": 0.04325183100432819,
+      "max_drawdown": 0.019972975926921266,
+      "win_rate": 1.0,
+      "profit_factor": null,
+      "profit_factor_nonfinite": "inf",
+      "n_trades": 1,
+      "total_return": 0.00102953391518823
+    },
+    "cost_2x": {
+      "sharpe": -0.01106968155457359,
+      "max_drawdown": 0.020757625265650725,
+      "win_rate": 0.0,
+      "profit_factor": 0.0,
+      "n_trades": 1,
+      "total_return": -0.0005570208128911069
+    },
+    "regimes": {
+      "range": {
+        "sharpe": 0.0,
+        "max_drawdown": 0.0,
+        "win_rate": 0.0,
+        "profit_factor": 0.0,
+        "n_trades": 0,
+        "total_return": 0.0
+      },
+      "trend": {
+        "sharpe": 0.06102013747926491,
+        "max_drawdown": 0.019972975926921377,
+        "win_rate": 1.0,
+        "profit_factor": null,
+        "profit_factor_nonfinite": "inf",
+        "n_trades": 1,
+        "total_return": 0.0010295339151880079
+      }
+    },
+    "sweep": {
+      "stable": false,
+      "reason": "neighbour score -0.076 < 0.122 (50% below best 0.244)",
+      "best_score": 0.24438589127788196,
+      "neighbour_scores": [
+        -0.07586192727980645,
+        0.17137991685577897
+      ],
+      "table": [
+        {
+          "entry": 0.0003,
+          "max_hold": 24,
+          "sharpe": 0.24438589127788196,
+          "total_return": 0.12905514329530576,
+          "n_trades": 80,
+          "ruined": false,
+          "score": 0.24438589127788196
+        },
+        {
+          "entry": 0.0003,
+          "max_hold": 48,
+          "sharpe": 0.17137991685577897,
+          "total_return": 0.049277412053326586,
+          "n_trades": 80,
+          "ruined": false,
+          "score": 0.17137991685577897
+        },
+        {
+          "entry": 0.0003,
+          "max_hold": 72,
+          "sharpe": 0.096748720226576,
+          "total_return": -0.029303368419166143,
+          "n_trades": 80,
+          "ruined": false,
+          "score": 0.096748720226576
+        },
+        {
+          "entry": 0.0005,
+          "max_hold": 24,
+          "sharpe": -0.07586192727980645,
+          "total_return": -0.12351102450090568,
+          "n_trades": 49,
+          "ruined": false,
+          "score": -0.07586192727980645
+        },
+        {
+          "entry": 0.0005,
+          "max_hold": 48,
+          "sharpe": -0.3065245193614888,
+          "total_return": -0.2847057625915427,
+          "n_trades": 49,
+          "ruined": false,
+          "score": -0.3065245193614888
+        },
+        {
+          "entry": 0.0005,
+          "max_hold": 72,
+          "sharpe": -0.4628277667564197,
+          "total_return": -0.37757749071880853,
+          "n_trades": 49,
+          "ruined": false,
+          "score": -0.4628277667564197
+        },
+        {
+          "entry": 0.001,
+          "max_hold": 24,
+          "sharpe": -0.2170640520312184,
+          "total_return": -0.1275137726749659,
+          "n_trades": 25,
+          "ruined": false,
+          "score": -0.2170640520312184
+        },
+        {
+          "entry": 0.001,
+          "max_hold": 48,
+          "sharpe": -0.31880706010517,
+          "total_return": -0.1913075937590737,
+          "n_trades": 25,
+          "ruined": false,
+          "score": -0.31880706010517
+        },
+        {
+          "entry": 0.001,
+          "max_hold": 72,
+          "sharpe": -0.29135627748904186,
+          "total_return": -0.18003332107012537,
+          "n_trades": 25,
+          "ruined": false,
+          "score": -0.29135627748904186
+        }
+      ]
+    }
+  },
+  {
+    "name": "trend_breakout",
+    "edge": "slow trend persistence: closes beyond the prior range tend to continue",
+    "symbol": "ETHUSDT",
+    "interval": "1h",
+    "params": {
+      "lookback": 336,
+      "vol_cap": 1.0
+    },
+    "passed": false,
+    "reasons": [
+      "hold-out max drawdown 0.521 > max 0.25",
+      "parameter sweep unstable: neighbour score 0.001 < 0.253 (50% below best 0.506)",
+      "trial-adjusted p-value 0.9363 > max 0.05 (deflated Sharpe, n_trials=51)"
+    ],
+    "flags": [
+      "regime range excluded: 1 trades < min 10, net return -0.3922 <= 0, Sharpe -0.862 <= 0",
+      "edge only in trend regime: restricted to it (stay out otherwise)"
+    ],
+    "allowed_regimes": [
+      "trend"
+    ],
+    "restricted_to": "trend",
+    "pvalue": 0.9362922570401992,
+    "n_trials": 51,
+    "ruined": false,
+    "train": {
+      "sharpe": 0.5060920496187103,
+      "max_drawdown": 0.6873658456791911,
+      "win_rate": 0.34545454545454546,
+      "profit_factor": 1.4949541120335528,
+      "n_trades": 55,
+      "total_return": 0.6510237687107201
+    },
+    "holdout": {
+      "sharpe": 0.5804551087955233,
+      "max_drawdown": 0.5214120721562758,
+      "win_rate": 0.43333333333333335,
+      "profit_factor": 1.4258693986857276,
+      "n_trades": 30,
+      "total_return": 0.33793923217447475
+    },
+    "cost_2x": {
+      "sharpe": 0.5315905861194441,
+      "max_drawdown": 0.532019119298463,
+      "win_rate": 0.43333333333333335,
+      "profit_factor": 1.3830838540784163,
+      "n_trades": 30,
+      "total_return": 0.27519598661959455
+    },
+    "regimes": {
+      "range": {
+        "sharpe": -0.8617265209413074,
+        "max_drawdown": 0.5273584296445406,
+        "win_rate": 0.0,
+        "profit_factor": 0.0,
+        "n_trades": 1,
+        "total_return": -0.39219102519653304
+      },
+      "trend": {
+        "sharpe": 1.7817589571208894,
+        "max_drawdown": 0.26917957894465694,
+        "win_rate": 0.4482758620689655,
+        "profit_factor": 1.5726341973560547,
+        "n_trades": 29,
+        "total_return": 1.2012495498394111
+      }
+    },
+    "sweep": {
+      "stable": false,
+      "reason": "neighbour score 0.001 < 0.253 (50% below best 0.506)",
+      "best_score": 0.5060920496187103,
+      "neighbour_scores": [
+        0.0007238772381574864,
+        0.2076853732992454
+      ],
+      "table": [
+        {
+          "lookback": 48,
+          "vol_cap": 1.0,
+          "sharpe": -0.10184451885623265,
+          "total_return": -0.6091112981150977,
+          "n_trades": 380,
+          "ruined": false,
+          "score": -0.10184451885623265
+        },
+        {
+          "lookback": 48,
+          "vol_cap": 1.5,
+          "sharpe": -0.10944582235984078,
+          "total_return": -0.6952219924684702,
+          "n_trades": 434,
+          "ruined": false,
+          "score": -0.10944582235984078
+        },
+        {
+          "lookback": 48,
+          "vol_cap": 2.0,
+          "sharpe": -0.2573977930553178,
+          "total_return": -0.7987956168473892,
+          "n_trades": 440,
+          "ruined": false,
+          "score": -0.2573977930553178
+        },
+        {
+          "lookback": 96,
+          "vol_cap": 1.0,
+          "sharpe": -0.029861372596017576,
+          "total_return": -0.539995275555287,
+          "n_trades": 202,
+          "ruined": false,
+          "score": -0.029861372596017576
+        },
+        {
+          "lookback": 96,
+          "vol_cap": 1.5,
+          "sharpe": 0.04256984761332166,
+          "total_return": -0.551604747498991,
+          "n_trades": 230,
+          "ruined": false,
+          "score": 0.04256984761332166
+        },
+        {
+          "lookback": 96,
+          "vol_cap": 2.0,
+          "sharpe": 0.0411413975321518,
+          "total_return": -0.5586611729165964,
+          "n_trades": 233,
+          "ruined": false,
+          "score": 0.0411413975321518
+        },
+        {
+          "lookback": 168,
+          "vol_cap": 1.0,
+          "sharpe": 0.0007238772381574864,
+          "total_return": -0.4922623153602148,
+          "n_trades": 123,
+          "ruined": false,
+          "score": 0.0007238772381574864
+        },
+        {
+          "lookback": 168,
+          "vol_cap": 1.5,
+          "sharpe": -0.00751843309558828,
+          "total_return": -0.5941953578803276,
+          "n_trades": 140,
+          "ruined": false,
+          "score": -0.00751843309558828
+        },
+        {
+          "lookback": 168,
+          "vol_cap": 2.0,
+          "sharpe": 0.07241828877780203,
+          "total_return": -0.5113681877736436,
+          "n_trades": 141,
+          "ruined": false,
+          "score": 0.07241828877780203
+        },
+        {
+          "lookback": 336,
+          "vol_cap": 1.0,
+          "sharpe": 0.5060920496187103,
+          "total_return": 0.6510237687107201,
+          "n_trades": 55,
+          "ruined": false,
+          "score": 0.5060920496187103
+        },
+        {
+          "lookback": 336,
+          "vol_cap": 1.5,
+          "sharpe": 0.2076853732992454,
+          "total_return": -0.297026265034148,
+          "n_trades": 68,
+          "ruined": false,
+          "score": 0.2076853732992454
+        },
+        {
+          "lookback": 336,
+          "vol_cap": 2.0,
+          "sharpe": 0.11716079155818647,
+          "total_return": -0.4615087671218706,
+          "n_trades": 71,
+          "ruined": false,
+          "score": 0.11716079155818647
+        }
+      ]
+    }
+  },
+  {
+    "name": "short_reversion",
+    "edge": "liquidity-driven overshoots partly retrace in range-bound markets",
+    "symbol": "ETHUSDT",
+    "interval": "1h",
+    "params": {
+      "z_entry": 2.0,
+      "er_max": 0.2
+    },
+    "passed": false,
+    "reasons": [
+      "hold-out net return -0.3355 <= 0 (no positive expectancy)",
+      "hold-out Sharpe -0.629 < min 0.5 (annualised)",
+      "hold-out max drawdown 0.470 > max 0.25",
+      "hold-out profit factor 0.862 < min 1.2",
+      "parameter sweep unstable: best score -1.126 is not positive",
+      "cost sensitivity: at 2.0x costs net return -0.5261, profit factor 0.735 (need return > 0 and PF > 1)",
+      "trial-adjusted p-value 0.9993 > max 0.05 (deflated Sharpe, n_trials=60)"
+    ],
+    "flags": [
+      "regime trend excluded: net return -0.4077 <= 0, Sharpe -1.467 <= 0",
+      "edge only in range regime: restricted to it (stay out otherwise)"
+    ],
+    "allowed_regimes": [
+      "range"
+    ],
+    "restricted_to": "range",
+    "pvalue": 0.9992708627702998,
+    "n_trials": 60,
+    "ruined": false,
+    "train": {
+      "sharpe": -1.1263949113839724,
+      "max_drawdown": 0.9246434542470632,
+      "win_rate": 0.5267326732673268,
+      "profit_factor": 0.7435487554043478,
+      "n_trades": 505,
+      "total_return": -0.8814331829078801
+    },
+    "holdout": {
+      "sharpe": -0.6288579235462922,
+      "max_drawdown": 0.46988283382754703,
+      "win_rate": 0.5829383886255924,
+      "profit_factor": 0.8618688593561699,
+      "n_trades": 211,
+      "total_return": -0.3354666826329985
+    },
+    "cost_2x": {
+      "sharpe": -1.2708023729848283,
+      "max_drawdown": 0.6068261484995972,
+      "win_rate": 0.5497630331753555,
+      "profit_factor": 0.7349218621014886,
+      "n_trades": 211,
+      "total_return": -0.526070597775127
+    },
+    "regimes": {
+      "range": {
+        "sharpe": 0.7123957138872473,
+        "max_drawdown": 0.2457938645551334,
+        "win_rate": 0.6133333333333333,
+        "profit_factor": 0.8964900654989877,
+        "n_trades": 75,
+        "total_return": 0.12190218134138187
+      },
+      "trend": {
+        "sharpe": -1.4674477428237405,
+        "max_drawdown": 0.5135247022893707,
+        "win_rate": 0.5661764705882353,
+        "profit_factor": 0.847248728060312,
+        "n_trades": 136,
+        "total_return": -0.40767267555138853
+      }
+    },
+    "sweep": {
+      "stable": false,
+      "reason": "best score -1.126 is not positive",
+      "best_score": -1.1263949113839724,
+      "neighbour_scores": [
+        -1.1829569426047621,
+        -1.6343230166708382
+      ],
+      "table": [
+        {
+          "z_entry": 2.0,
+          "er_max": 0.2,
+          "sharpe": -1.1263949113839724,
+          "total_return": -0.8814331829078801,
+          "n_trades": 505,
+          "ruined": false,
+          "score": -1.1263949113839724
+        },
+        {
+          "z_entry": 2.0,
+          "er_max": 0.3,
+          "sharpe": -1.6343230166708382,
+          "total_return": -0.9684551314977631,
+          "n_trades": 619,
+          "ruined": false,
+          "score": -1.6343230166708382
+        },
+        {
+          "z_entry": 2.0,
+          "er_max": 0.4,
+          "sharpe": -1.5356798480556482,
+          "total_return": -0.9688112340375965,
+          "n_trades": 667,
+          "ruined": false,
+          "score": -1.5356798480556482
+        },
+        {
+          "z_entry": 2.5,
+          "er_max": 0.2,
+          "sharpe": -1.1829569426047621,
+          "total_return": -0.8298592224667256,
+          "n_trades": 295,
+          "ruined": false,
+          "score": -1.1829569426047621
+        },
+        {
+          "z_entry": 2.5,
+          "er_max": 0.3,
+          "sharpe": -1.4576896919136033,
+          "total_return": -0.9221629330197133,
+          "n_trades": 360,
+          "ruined": false,
+          "score": -1.4576896919136033
+        },
+        {
+          "z_entry": 2.5,
+          "er_max": 0.4,
+          "sharpe": -1.3414856244446982,
+          "total_return": -0.9178467818433903,
+          "n_trades": 390,
+          "ruined": false,
+          "score": -1.3414856244446982
+        },
+        {
+          "z_entry": 3.0,
+          "er_max": 0.2,
+          "sharpe": -1.2539753302241898,
+          "total_return": -0.7627246788135064,
+          "n_trades": 171,
+          "ruined": false,
+          "score": -1.2539753302241898
+        },
+        {
+          "z_entry": 3.0,
+          "er_max": 0.3,
+          "sharpe": -1.316037933587485,
+          "total_return": -0.8412345027312054,
+          "n_trades": 207,
+          "ruined": false,
+          "score": -1.316037933587485
+        },
+        {
+          "z_entry": 3.0,
+          "er_max": 0.4,
+          "sharpe": -1.2420527475035101,
+          "total_return": -0.8496251199553478,
+          "n_trades": 230,
+          "ruined": false,
+          "score": -1.2420527475035101
+        }
+      ]
+    }
+  }
+]
