@@ -38,6 +38,10 @@ class FakeVenue:
     # Error injection: number of upcoming calls that raise, and whether
     # flatten_all should raise.
     fail_next: int = 0
+    # Exception raised by an injected failure (default: a plain VenueError).
+    fail_with: Exception | None = None
+    # Commission reported on fills; None = unknown, as the testnet RESULT gives.
+    fill_fee: float | None = None
     fail_flatten: bool = False
     flatten_calls: int = 0
     orders: list[Order] = field(default_factory=list)
@@ -57,7 +61,7 @@ class FakeVenue:
     def _maybe_fail(self) -> None:
         if self.fail_next > 0:
             self.fail_next -= 1
-            raise VenueError("injected error")
+            raise self.fail_with or VenueError("injected error")
 
     def server_time(self) -> datetime:
         self._maybe_fail()
@@ -108,7 +112,7 @@ class FakeVenue:
             side=order.side,
             qty=qty,
             price=order.price_ref,
-            fee=0.0,
+            fee=self.fill_fee,
             time=self.now,
         )
 

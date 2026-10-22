@@ -130,7 +130,7 @@ Filled in after the research run and the Task 7/8 builds. Everything below is ei
 - `funding_reversion` is untested, not refuted. The hold-out held 0 BTCUSDT and 1 ETHUSDT funding settlements beyond +-0.03%, against 430 and 496 in train, so it made 0 and 1 trades.
 - Any change to a strategy needs a new research run, counted in `research/trials.json`.
 
-**Costs are assumptions.** The 1 bp half-spread and 2 bp slippage in `config/research.yaml` were not measured, because the mainnet order book is unreachable from the sandbox. The gate re-tests at 2x costs, but real costs could still be higher, and the account's real fee tier is unknown. Fees are not read back from fills: the runtime logs `Fill.fee = 0`.
+**Costs are assumptions.** The 1 bp half-spread and 2 bp slippage in `config/research.yaml` were not measured, because the mainnet order book is unreachable from the sandbox. The gate re-tests at 2x costs, but real costs could still be higher, and the account's real fee tier is unknown. Fees are not read back from fills: `Fill.fee` is None and the decision log says "fee unknown".
 
 **Testnet vs mainnet fills.** Paper trading runs on the Binance Futures testnet. Its liquidity, spreads, fills and funding are not mainnet's, so paper results can flatter or distort live behaviour. Research used mainnet archive data; the runtime uses testnet prices. No live fill has ever been observed.
 
@@ -167,7 +167,7 @@ Filled in after the research run and the Task 7/8 builds. Everything below is ei
 - The local clock.
 - The environment variables that hold the keys.
 - The kill switch flattens through the same venue API it guards. If that API is down, the flatten fails (logged `flatten_failed`, and the system stays halted). Only the exchange-side reduce-only stops then protect open positions.
-- There is no client-side rate limiting, and `Retry-After` on 429/418 is ignored.
+- There is no client-side rate limiting. A 429 is counted as an API error and the loop waits the venue's `Retry-After` (at least one poll interval, at most 900 s, 60 s if absent); a 418 (IP ban) trips the kill switch, whose flatten then likely fails against the same ban, leaving the exchange-side stops as the only protection.
 
 **The runtime does not trade what research validated.** A research pass does NOT validate the runtime's sizing or stop policy. Research backtests each signal's fractional position (e.g. trend_breakout's vol_cap scaling up to 1x equity) with no stop-outs; the paper runtime keeps only the sign of the signal, sizes for 1% risk at a 3 x ATR(14) exchange-side disaster stop (roughly 0.4x equity notional on ETH 1h, an illustrative estimate) and does not re-enter after a stop-out until a fresh signal transition. The backtest simulates neither the stop nor that rule. Making it do so would be a new research design and a new counted run, for the user to decide.
 

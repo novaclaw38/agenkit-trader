@@ -353,10 +353,17 @@ def test_cancel_open_orders_cancels_regular_and_algo(keys: None) -> None:
 
 def test_flatten_all_cancels_and_closes_reduce_only(keys: None) -> None:
     s = Server()
-    s.routes[("GET", "/fapi/v2/positionRisk")] = lambda r: [
-        {"symbol": "BTCUSDT", "positionAmt": "-0.020", "entryPrice": "50000"},
-        {"symbol": "ETHUSDT", "positionAmt": "0.000", "entryPrice": "0"},
-    ]
+    reads = {"n": 0}
+
+    def positions(r: httpx.Request) -> Any:
+        reads["n"] += 1  # flat after the close (verified by a re-read)
+        amt = "-0.020" if reads["n"] == 1 else "0.000"
+        return [
+            {"symbol": "BTCUSDT", "positionAmt": amt, "entryPrice": "50000"},
+            {"symbol": "ETHUSDT", "positionAmt": "0.000", "entryPrice": "0"},
+        ]
+
+    s.routes[("GET", "/fapi/v2/positionRisk")] = positions
     s.routes[("GET", "/fapi/v1/openOrders")] = lambda r: []
     s.routes[("GET", "/fapi/v1/openAlgoOrders")] = lambda r: [
         {
@@ -523,3 +530,101 @@ def test_testnet_smoke_unsigned_only(monkeypatch: pytest.MonkeyPatch) -> None:
     assert abs((t - datetime.now(UTC)).total_seconds()) < 60
     r = v.symbol_rules("BTCUSDT")
     assert r.tick > 0 and r.lot > 0 and r.min_notional >= 0
+
+
+# ------------------------------------------------ rate limits (429 / 418)
+
+
+@pytest.mark.parametrize(("status", "banned"), [(429, False), (418, True)])
+def test_rate_limit_raises_with_retry_after(status: int, banned: bool) -> None:
+    from agenkit_trader.execution.venue import RateLimited
+
+    s = Server()
+    s.routes[("GET", "/fapi/v1/premiumIndex")] = lambda r: httpx.Response(
+        status, headers={"Retry-After": "17"}, json={"code": -1003, "msg": "slow"}
+    )
+    with pytest.raises(RateLimited) as ei:
+        venue(s).get_mark_price("BTCUSDT")
+    assert ei.value.retry_after == 17.0
+    assert ei.value.banned is banned
+    assert isinstance(ei.value, VenueError)
+
+
+def test_rate_limit_without_header_has_no_retry_after() -> None:
+    from agenkit_trader.execution.venue import RateLimited
+
+    s = Server()
+    s.routes[("GET", "/fapi/v1/premiumIndex")] = lambda r: httpx.Response(
+        429, json={"code": -1003, "msg": "slow"}
+    )
+    with pytest.raises(RateLimited) as ei:
+        venue(s).get_mark_price("BTCUSDT")
+    assert ei.value.retry_after is None
+
+
+# ------------------------------------------------ flatten verification
+
+
+def _flatten_server(rows: list[dict[str, str]]) -> Server:
+    s = Server()
+    state = {"rows": rows}
+    s.routes[("GET", "/fapi/v2/positionRisk")] = lambda r: state["rows"]
+    s.routes[("GET", "/fapi/v1/openOrders")] = lambda r: []
+    s.routes[("GET", "/fapi/v1/openAlgoOrders")] = lambda r: []
+    s.routes[("DELETE", "/fapi/v1/allOpenOrders")] = lambda r: {"code": 200}
+    s.routes[("DELETE", "/fapi/v1/algoOpenOrders")] = lambda r: {"code": 200}
+    s.routes[("POST", "/fapi/v1/order")] = lambda r: {
+        "status": "FILLED",
+        "executedQty": query(r)["quantity"],
+        "avgPrice": "50000",
+    }
+    return s
+
+
+def test_flatten_all_position_read_failure_raises_loudly(
+    keys: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    s = _flatten_server([])
+    s.routes[("GET", "/fapi/v2/positionRisk")] = lambda r: httpx.Response(
+        500, json={"code": -1000, "msg": "down"}
+    )
+    with pytest.raises(VenueError, match="positions"):
+        venue(s).flatten_all()
+    assert any("flatten" in rec.getMessage() for rec in caplog.records)
+    assert not [r for r in s.requests if r.method == "POST"]
+
+
+def test_flatten_all_residual_position_raises(
+    keys: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # the close "fills" but the venue still reports the position afterwards
+    s = _flatten_server(
+        [{"symbol": "BTCUSDT", "positionAmt": "0.020", "entryPrice": "50000"}]
+    )
+    v = venue(s)
+    with pytest.raises(VenueError, match="residual"):
+        v.flatten_all()
+    ks = KillSwitch(v, DecisionLog(tmp_path / "l.jsonl"), RiskConfig())
+    assert ks.trigger("test") is False
+
+
+def test_flatten_all_rereads_and_succeeds_when_flat(keys: None) -> None:
+    s = _flatten_server(
+        [{"symbol": "BTCUSDT", "positionAmt": "0.020", "entryPrice": "50000"}]
+    )
+    rows = [{"symbol": "BTCUSDT", "positionAmt": "0.020", "entryPrice": "50000"}]
+    calls = {"n": 0}
+
+    def pos(r: httpx.Request) -> Any:
+        calls["n"] += 1
+        return rows if calls["n"] == 1 else []
+
+    s.routes[("GET", "/fapi/v2/positionRisk")] = pos
+    venue(s).flatten_all()
+    assert calls["n"] == 2
+
+
+def test_market_fill_fee_is_unknown_not_zero(keys: None) -> None:
+    s = _flatten_server([])
+    o = Order("BTCUSDT", "buy", 0.012, 50000.0, 49000.0, "trend", "akabc", False)
+    assert venue(s).place_order(o).fee is None

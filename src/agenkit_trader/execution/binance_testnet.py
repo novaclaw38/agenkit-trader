@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import os
 import time
 from collections.abc import Callable
@@ -45,6 +46,7 @@ from agenkit_trader.execution.venue import (
     OrderStatus,
     OrderStatusUnknownError,
     Position,
+    RateLimited,
     SymbolRules,
     VenueError,
 )
@@ -55,6 +57,17 @@ DEFAULT_BASE_URL = f"https://{TESTNET_HOST}"
 _TERMINAL = {"CANCELED", "EXPIRED", "REJECTED", "EXPIRED_IN_MATCH"}
 _ORDER_DOES_NOT_EXIST = -2013
 _RULES_TTL_MS = 3_600_000
+_log = logging.getLogger(__name__)
+
+
+def _retry_after(r: httpx.Response) -> float | None:
+    raw = r.headers.get("Retry-After")
+    try:
+        v = float(raw) if raw is not None else None
+    except ValueError:
+        return None
+    return v if v is not None and v >= 0 and v == v else None
+
 
 __all__ = [
     "DEFAULT_BASE_URL",
@@ -229,6 +242,15 @@ class BinanceTestnetVenue:
                     code, msg = body.get("code"), str(body.get("msg", ""))[:200]
             except ValueError:
                 pass
+            if r.status_code in (418, 429):
+                ra = _retry_after(r)
+                raise RateLimited(
+                    f"{method} {path}: HTTP {r.status_code} "
+                    f"{'IP banned' if r.status_code == 418 else 'rate limited'} "
+                    f"code={code} retry_after={ra}",
+                    retry_after=ra,
+                    banned=r.status_code == 418,
+                )
             raise BinanceAPIError(method, path, r.status_code, code, msg)
         try:
             return r.json()
@@ -407,7 +429,7 @@ class BinanceTestnetVenue:
             side=side.lower(),
             qty=executed,
             price=float(r.get("avgPrice") or 0),
-            fee=0.0,  # not in the RESULT response; see account trades
+            fee=None,  # not in the RESULT response: fee unknown
             time=when,
         )
 
@@ -487,8 +509,17 @@ class BinanceTestnetVenue:
     def flatten_all(self) -> None:
         """Kill-switch path (never through the RiskGate): cancel open orders,
         then close every position with a reduce-only market order. Attempts
-        everything, then raises if anything failed."""
-        rows = self._position_rows()  # without positions there is no flatten
+        everything, re-reads positions, then raises if anything failed or any
+        position remains. Never reports success it cannot verify."""
+        try:
+            rows = self._position_rows()
+        except VenueError as exc:
+            _log.critical(
+                "flatten_all: cannot read positions, NOTHING was flattened: %s", exc
+            )
+            raise VenueError(
+                f"flatten_all: cannot read positions, nothing flattened: {exc}"
+            ) from None
         errors: list[str] = []
         symbols = {r["symbol"] for r in rows}
         try:
@@ -507,5 +538,16 @@ class BinanceTestnetVenue:
                 self._market(r["symbol"], side, amt.lstrip("-+"), "", True)
             except VenueError as exc:
                 errors.append(f"close {r['symbol']}: {exc}")
+        try:
+            residual = self._position_rows()
+        except VenueError as exc:
+            errors.append(f"re-read positions after close: {exc}")
+        else:
+            if residual:
+                errors.append(
+                    "residual positions after close: "
+                    + ", ".join(f"{r['symbol']} {r['positionAmt']}" for r in residual)
+                )
         if errors:
+            _log.critical("flatten_all incomplete: %s", " | ".join(errors))
             raise VenueError("flatten_all incomplete: " + " | ".join(errors))

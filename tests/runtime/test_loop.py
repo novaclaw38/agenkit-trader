@@ -1077,3 +1077,152 @@ def test_repair_client_id_depends_on_size_and_bar() -> None:
     a = client_order_id("s", "BTCUSDT", LAST, "restop|0.5")
     assert a != client_order_id("s", "BTCUSDT", LAST, "restop|0.3")
     assert a != client_order_id("s", "BTCUSDT", LAST + STEP, "restop|0.5")
+
+
+# ------------------------------------------- unexpected errors outside _step
+
+
+def _run(h: Harness, sleep: Any, max_cycles: int = 100) -> None:
+    run_loop(
+        h.venue,
+        [h.strategy],
+        h.deployments,
+        h.gate,
+        h.kill,
+        h.log,
+        lambda: h.now,
+        runtime_cfg=h.rt_cfg,
+        init_state=True,
+        sleep=sleep,
+        max_cycles=max_cycles,
+        state_path=h.state_path,
+    )
+
+
+def test_unexpected_cycle_exception_is_logged_counted_and_halts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = enter_long(tmp_path)
+
+    def boom(self: Runtime, now: Any) -> None:
+        raise AssertionError("invariant broken")
+
+    monkeypatch.setattr(Runtime, "_cycle", boom)
+    slept: list[float] = []
+    _run(h, slept.append)  # must not raise
+    assert h.kill.halted and h.venue.flatten_calls == 1
+    errs = h.records("runtime_error")
+    assert len(errs) == RiskConfig().max_api_errors
+    assert "invariant broken" in errs[0]["output"]["error"]
+    assert len(h.records("api_error")) == RiskConfig().max_api_errors
+
+
+def test_save_failure_in_cycle_does_not_crash_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = enter_long(tmp_path)
+    real = Runtime._save
+
+    def save(self: Runtime) -> None:
+        if self._started:
+            raise OSError(28, "No space left on device")
+        real(self)
+
+    monkeypatch.setattr(Runtime, "_save", save)
+    _run(h, lambda s: None)
+    assert h.kill.halted and h.venue.flatten_calls == 1
+    assert any("No space" in r["output"]["error"] for r in h.records("runtime_error"))
+
+
+def test_startup_refused_still_raises_from_run_loop(tmp_path: Path) -> None:
+    h = enter_long(tmp_path)
+    h.venue.fail_next = 10**6
+    with pytest.raises(StartupRefused):
+        _run(h, lambda s: None)
+
+
+# ------------------------------------------------------- rate limits
+
+
+def _limit_first_bars(h: Harness, exc: Exception, calls: dict[str, int]) -> None:
+    """The first bars request of the first cycle raises ``exc``."""
+    real = h.venue.get_bars
+
+    def get_bars(sym: str, interval: str, limit: int) -> pd.DataFrame:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise exc
+        return real(sym, interval, limit)
+
+    h.venue.get_bars = get_bars  # type: ignore[method-assign]
+
+
+def test_rate_limit_backs_off_by_retry_after(tmp_path: Path) -> None:
+    from agenkit_trader.execution.venue import RateLimited
+
+    h = enter_long(tmp_path)
+    slept: list[float] = []
+    calls = {"n": 0}
+
+    def sleep(s: float) -> None:
+        slept.append(s)
+
+    _limit_first_bars(h, RateLimited("429", retry_after=120.0, banned=False), calls)
+    _run(h, sleep, max_cycles=2)
+    assert slept[0] == 120.0
+    assert not h.kill.halted
+    assert len(h.records("api_error")) == 1
+    assert h.records("rate_limited")
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "expected"), [(10**6, 900.0), (None, 60.0), (1.0, 30.0)]
+)
+def test_rate_limit_backoff_is_bounded_and_never_fast(
+    tmp_path: Path, retry_after: float | None, expected: float
+) -> None:
+    from agenkit_trader.execution.venue import RateLimited
+
+    h = enter_long(tmp_path)
+    slept: list[float] = []
+    calls = {"n": 0}
+    _limit_first_bars(
+        h, RateLimited("429", retry_after=retry_after, banned=False), calls
+    )
+    _run(h, slept.append, max_cycles=2)
+    assert slept[0] == expected
+    assert slept[0] >= h.rt_cfg.poll_interval_s
+
+
+def test_ip_ban_418_halts(tmp_path: Path) -> None:
+    from agenkit_trader.execution.venue import RateLimited
+
+    h = enter_long(tmp_path)
+    calls = {"n": 0}
+    _limit_first_bars(h, RateLimited("418", retry_after=600.0, banned=True), calls)
+    slept: list[float] = []
+    _run(h, slept.append)
+    assert h.kill.halted
+    assert h.records("kill_switch")[-1]["inputs"]["reason"] == "ip_banned"
+    assert slept == []
+
+
+# ------------------------------------------------------- unknown fees
+
+
+def test_unknown_fee_is_logged_as_unknown(tmp_path: Path) -> None:
+    h = enter_long(tmp_path)
+    h.rt.start()
+    h.rt.cycle()
+    rec = [r for r in h.records("order") if r["result"] == "filled"][-1]
+    assert rec["output"]["fill"]["fee"] is None
+    assert rec["output"]["fee"] == "fee unknown"
+
+
+def test_known_fee_is_logged(tmp_path: Path) -> None:
+    h = enter_long(tmp_path)
+    h.venue.fill_fee = 0.25
+    h.rt.start()
+    h.rt.cycle()
+    rec = [r for r in h.records("order") if r["result"] == "filled"][-1]
+    assert rec["output"]["fee"] == 0.25

@@ -24,6 +24,19 @@ class ClockSkewError(VenueError):
     """Local clock differs from the venue's by more than MAX_CLOCK_SKEW_MS."""
 
 
+class RateLimited(VenueError):
+    """The venue rate-limited us (HTTP 429) or banned the IP (HTTP 418).
+
+    ``retry_after`` is the venue's ``Retry-After`` in seconds (None if it sent
+    none). ``banned`` is True for a 418: the runtime halts instead of waiting.
+    """
+
+    def __init__(self, msg: str, retry_after: float | None, banned: bool) -> None:
+        self.retry_after = retry_after
+        self.banned = banned
+        super().__init__(msg)
+
+
 class OrderNotFilledError(VenueError):
     """The venue DEFINITELY did not fill the order (terminal status, nothing
     executed). Any other failure of ``place_order`` means "unknown"."""
@@ -88,7 +101,9 @@ class Fill:
     side: str
     qty: float
     price: float
-    fee: float
+    # Commission in quote currency; None when the venue did not report it
+    # ("fee unknown"), never a made-up 0.0.
+    fee: float | None
     time: datetime
 
 

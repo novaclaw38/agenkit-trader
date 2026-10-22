@@ -102,6 +102,7 @@ from agenkit_trader.execution.venue import (
     Order,
     OrderNotFilledError,
     Position,
+    RateLimited,
     SymbolRules,
     Venue,
 )
@@ -117,6 +118,10 @@ FUNDING_LIMIT = 1000  # Binance fundingRate max per request
 SUPPORTED_AUX = ("funding",)
 CLOSE_GRACE = pd.Timedelta(seconds=2)
 HALT_KINDS = ("kill_switch", "halt")
+# Rate-limit back-off (HTTP 429): wait the venue's Retry-After, at least one
+# poll interval, at most MAX_BACKOFF_S; DEFAULT_BACKOFF_S without the header.
+MAX_BACKOFF_S = 900.0
+DEFAULT_BACKOFF_S = 60.0
 _T = TypeVar("_T")
 
 
@@ -426,6 +431,15 @@ def reset_halt(state_path: Path, log: DecisionLog) -> bool:
     return was_state is not None or was_logged is not None
 
 
+def _fill_output(fill: Fill) -> dict[str, Any]:
+    """Decision-record output for a fill; an unreported commission is logged
+    as "fee unknown", never as 0."""
+    return {
+        "fill": asdict(fill),
+        "fee": "fee unknown" if fill.fee is None else fill.fee,
+    }
+
+
 class Runtime:
     def __init__(
         self,
@@ -468,6 +482,8 @@ class Runtime:
         # symbol -> position size at the repair attempt of the current
         # uncovered episode (cleared once a check sees coverage or flat)
         self._repaired: dict[str, float] = {}
+        # largest Retry-After seen this cycle (seconds); run_loop sleeps it
+        self.backoff_s = 0.0
 
     # ------------------------------------------------------------ helpers
 
@@ -488,7 +504,23 @@ class Runtime:
                 self.kill.trigger("clock_skew")
             else:
                 self.kill.record_api_error(self.clock())
+                if isinstance(exc, RateLimited):
+                    self.note_rate_limit(exc)
             raise _VenueFailed(name) from exc
+
+    def note_rate_limit(self, exc: RateLimited) -> None:
+        """A 429 sets the back-off run_loop sleeps; a 418 (IP ban) halts."""
+        self.log.write(
+            "rate_limited",
+            {"retry_after": exc.retry_after, "banned": exc.banned},
+            {"error": str(exc)},
+            "halt" if exc.banned else "backoff",
+        )
+        if exc.banned:
+            self.kill.trigger("ip_banned")
+            return
+        wait = DEFAULT_BACKOFF_S if exc.retry_after is None else exc.retry_after
+        self.backoff_s = max(self.backoff_s, wait)
 
     def _save(self) -> None:
         if self.kill.halted and self._st.halted is None:
@@ -556,12 +588,12 @@ class Runtime:
             resolved = self._resolve(order)
             if resolved is not None:
                 self.log.write(
-                    "order", inputs, {"fill": asdict(resolved)}, "filled_after_error"
+                    "order", inputs, _fill_output(resolved), "filled_after_error"
                 )
                 return resolved
             self.log.write("order", inputs, asdict(decision), "unknown")
             return None
-        self.log.write("order", inputs, {"fill": asdict(fill)}, "filled")
+        self.log.write("order", inputs, _fill_output(fill), "filled")
         return fill
 
     def _resolve(self, order: Order) -> Fill | None:
@@ -577,7 +609,7 @@ class Runtime:
             side=order.side,
             qty=st.executed_qty,
             price=st.avg_price if st.avg_price > 0 else order.price_ref,
-            fee=0.0,
+            fee=None,  # an order lookup reports no commission: fee unknown
             time=self.clock(),
         )
 
@@ -659,6 +691,8 @@ class Runtime:
                 "venue_error", {"call": "server_time"}, {"error": repr(exc)}, "error"
             )
             self.kill.record_api_error(now)
+            if isinstance(exc, RateLimited):
+                self.note_rate_limit(exc)
             return False
         self._data_now = min(server, now)
         return True
@@ -1082,8 +1116,31 @@ def run_loop(
     )
     rt.start()
     cycles = 0
+    failed_in_a_row = 0
     while True:
-        rt.cycle()
+        rt.backoff_s = 0.0
+        try:
+            rt.cycle()
+            failed_in_a_row = 0
+        except StartupRefused:
+            raise
+        except Exception as exc:
+            # anything that escaped the cycle (a failed state save on a full
+            # disk, a broken invariant, ...): log it, count it like an API
+            # error, and trip the kill switch at the configured limit
+            failed_in_a_row += 1
+            log.write(
+                "runtime_error",
+                {"where": "cycle", "in_a_row": failed_in_a_row},
+                {"error": repr(exc)},
+                "error",
+            )
+            if isinstance(exc, RateLimited):
+                rt.note_rate_limit(exc)
+            if not kill.halted:
+                kill.record_api_error(clock())
+            if not kill.halted and failed_in_a_row >= kill.cfg.max_api_errors:
+                kill.trigger("unexpected_error_limit")
         cycles += 1
         if kill.halted:
             log.write("runtime", {"cycles": cycles}, {}, "halted")
@@ -1091,4 +1148,8 @@ def run_loop(
         if max_cycles is not None and cycles >= max_cycles:
             log.write("runtime", {"cycles": cycles}, {}, "stopped")
             return
-        sleep(runtime_cfg.poll_interval_s)
+        wait = float(runtime_cfg.poll_interval_s)
+        if rt.backoff_s > 0:
+            wait = min(MAX_BACKOFF_S, max(wait, rt.backoff_s))
+            log.write("runtime", {"backoff_s": wait}, {}, "rate_limit_backoff")
+        sleep(wait)
