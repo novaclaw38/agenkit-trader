@@ -24,6 +24,7 @@ def _v(name: str, passed: bool, pf: float = 1.5) -> Verdict:
         interval="1h",
         params={"thr": 0.5},
         allowed_regimes=["range", "trend"],
+        restricted_to=None,
         flags=[],
         pvalue=0.01,
         n_trials=12,
@@ -75,3 +76,19 @@ def test_nothing_passes_overwrites_stale_deployed(tmp_path) -> None:
         "report.json",
         "report.md",
     ]
+
+
+def test_deployed_written_last(tmp_path, monkeypatch) -> None:
+    import agenkit_trader.validation.report as rep
+
+    order: list[str] = []
+    real = rep.atomic_write_text
+
+    def spy(path, text):  # type: ignore[no-untyped-def]
+        order.append(path.name)
+        real(path, text)
+
+    monkeypatch.setattr(rep, "atomic_write_text", spy)
+    write_report([_v("good", True)], tmp_path / "report.md")
+    assert order[-1] == "deployed.json"
+    assert sorted(order) == ["deployed.json", "report.json", "report.md"]

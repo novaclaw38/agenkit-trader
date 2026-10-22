@@ -8,6 +8,7 @@ for the current run.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import math
 import os
@@ -44,7 +45,10 @@ class TrialCounter:
 
     The file is the source of truth: ``total`` re-reads it and ``add``
     read-modify-writes it atomically, so separate instances (and separate
-    runs) agree. Not safe against two *concurrent* writers.
+    runs) agree. Concurrent writers are serialised: ``add`` holds an exclusive
+    ``fcntl.flock`` on the sibling file ``<name>.lock`` for the whole
+    read-add-replace, so no increment is lost (POSIX only; the lock file is
+    left in place).
     """
 
     def __init__(self, path: Path = DEFAULT_TRIALS_PATH) -> None:
@@ -67,8 +71,15 @@ class TrialCounter:
         """Record ``n`` (> 0) more trials; return the new total."""
         if not isinstance(n, int) or isinstance(n, bool) or n <= 0:
             raise ValueError(f"trial increment must be a positive int, got {n!r}")
-        new = self.total + n
-        atomic_write_text(self.path, json.dumps({"total": new}) + "\n")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        lock = self.path.with_name(self.path.name + ".lock")
+        with open(lock, "a") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            try:
+                new = self.total + n
+                atomic_write_text(self.path, json.dumps({"total": new}) + "\n")
+            finally:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
         return new
 
 

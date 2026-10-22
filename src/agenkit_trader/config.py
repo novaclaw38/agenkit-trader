@@ -64,6 +64,12 @@ class GateConfig:
     # Max fractional performance loss of neighbouring parameter settings
     # relative to the best before a sweep is deemed unstable.
     neighbour_tolerance: float
+    # Sanity floor on hold-out win rate (Sharpe and profit factor bind).
+    min_win_rate: float
+    # A regime counts as having an edge only with at least this many trades.
+    min_trades_per_regime: int
+    # Look-back (bars) of the efficiency-ratio regime labeller.
+    regime_window: int
 
     def __post_init__(self) -> None:
         _require_finite(self)
@@ -83,6 +89,12 @@ class GateConfig:
             raise ValueError("max_trial_adjusted_pvalue must be in (0, 1]")
         if not 0 < self.neighbour_tolerance <= 1:
             raise ValueError("neighbour_tolerance must be in (0, 1]")
+        if not 0 <= self.min_win_rate <= 1:
+            raise ValueError("min_win_rate must be in [0, 1]")
+        for name in ("min_trades_per_regime", "regime_window"):
+            v = getattr(self, name)
+            if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
+                raise ValueError(f"{name} must be a positive int, got {v!r}")
 
 
 def _load_mapping(path: Path) -> dict[str, Any]:

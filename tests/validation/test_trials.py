@@ -1,5 +1,6 @@
 import json
 import math
+import multiprocessing as mp
 from statistics import NormalDist
 
 import pytest
@@ -17,7 +18,8 @@ def test_counter_persists_across_instances(tmp_path) -> None:
     TrialCounter(p).add(2)
     assert c.total == 10  # re-read from disk, never a stale in-memory count
     assert json.loads(p.read_text())["total"] == 10
-    assert [x.name for x in p.parent.iterdir()] == ["trials.json"]  # no temp left
+    names = sorted(x.name for x in p.parent.iterdir())
+    assert names == ["trials.json", "trials.json.lock"]  # no temp file left
 
 
 @pytest.mark.parametrize("n", [0, -1])
@@ -80,3 +82,21 @@ def test_pvalue_worsens_with_trials() -> None:
 def test_pvalue_rejects_bad_input(args) -> None:
     with pytest.raises(ValueError):
         deflated_sharpe_pvalue(*args)
+
+
+def _hammer(path: str, n: int) -> None:
+    c = TrialCounter(path)  # type: ignore[arg-type]
+    for _ in range(n):
+        c.add(1)
+
+
+def test_counter_exact_under_concurrent_processes(tmp_path) -> None:
+    p = tmp_path / "trials.json"
+    ctx = mp.get_context("fork")
+    procs = [ctx.Process(target=_hammer, args=(str(p), 200)) for _ in range(2)]
+    for pr in procs:
+        pr.start()
+    for pr in procs:
+        pr.join(60)
+        assert pr.exitcode == 0
+    assert TrialCounter(p).total == 400

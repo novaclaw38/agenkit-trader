@@ -15,24 +15,25 @@ Protocol (statistical honesty first):
    not ruined; trades >= ``min_trades`` (zero trades is its own reason); net
    return > 0; annualised Sharpe >= ``min_sharpe``; drawdown <=
    ``max_drawdown``; profit factor >= ``min_profit_factor`` (``inf`` passes,
-   NaN fails); sweep stable; cost sensitivity: re-run at
+   NaN fails); win rate >= ``min_win_rate``; sweep stable; cost sensitivity: re-run at
    ``costs.scaled(cost_multiplier)`` and require net return > 0, profit factor
    > 1 and no ruin; deflated-Sharpe p-value (per-period Sharpe, cumulative
    trial count) <= ``max_trial_adjusted_pvalue``.
 6. Regimes. ``label_regimes`` labels each bar *trend* (1.0) or *range* (0.0)
-   with Kaufman's efficiency ratio over ``REGIME_WINDOW`` bars,
+   with Kaufman's efficiency ratio over ``regime_window`` bars,
    ``ER_t = |c_t - c_{t-w}| / sum_{i=t-w+1..t} |c_i - c_{i-1}|``: the bar is
    *trend* when ``ER_t`` is above the expanding median of all ER values up to
    and including ``t`` (so only past and present information is used; NaN
    during warm-up). A bar's return is attributed to the regime known when its
    position was decided (the label of the previous bar). A regime "has edge"
-   if the hold-out made trades in it with positive net return and positive
-   Sharpe. If exactly one regime has edge, the verdict is flagged and
-   ``allowed_regimes`` contains only that regime: the runtime must stay out
-   (flat) in the other. No regime with edge is a rejection.
+   only with at least ``min_trades_per_regime`` hold-out trades in it,
+   positive net return and positive Sharpe; excluded regimes are noted in
+   ``flags``. If exactly one regime has edge, ``restricted_to`` names it and
+   ``allowed_regimes`` contains only it: the runtime must stay out (flat) in
+   the other. No regime with edge is a rejection.
 
-Win rate is reported but not gated: ``GateConfig`` defines no threshold for
-it and this module does not invent one.
+Win rate is gated by ``min_win_rate``, a sanity floor (Sharpe and profit
+factor are the binding checks).
 """
 
 from __future__ import annotations
@@ -60,7 +61,6 @@ from agenkit_trader.validation.sweep import (
 )
 from agenkit_trader.validation.trials import TrialCounter, deflated_sharpe_pvalue
 
-REGIME_WINDOW = 48
 REGIMES = ("range", "trend")  # label 0.0, 1.0
 _SECONDS_PER_YEAR = 365.0 * 24 * 3600
 
@@ -84,6 +84,7 @@ class Verdict:
     interval: str
     params: dict[str, Any]
     allowed_regimes: list[str]
+    restricted_to: str | None
     flags: list[str]
     pvalue: float
     n_trials: int
@@ -91,7 +92,7 @@ class Verdict:
     ruined: bool
 
 
-def label_regimes(bars: pd.DataFrame, window: int = REGIME_WINDOW) -> pd.Series:
+def label_regimes(bars: pd.DataFrame, window: int) -> pd.Series:
     """1.0 = trend, 0.0 = range, NaN = warm-up; causal (see module docs)."""
     c = bars["close"].astype("float64")
     path = c.diff().abs().rolling(window).sum()
@@ -107,13 +108,61 @@ def passes_cost_check(stats: Stats, *, ruined: bool) -> bool:
     return (not ruined) and stats.total_return > 0 and not math.isnan(pf) and pf > 1.0
 
 
-def allowed_regimes(regimes: dict[str, Stats]) -> list[str]:
-    """Sorted names of regimes in which the strategy showed an edge."""
-    return sorted(
-        k
-        for k, s in regimes.items()
-        if s.n_trades > 0 and s.total_return > 0 and s.sharpe > 0
-    )
+def allowed_regimes(
+    regimes: dict[str, Stats], min_trades: int
+) -> tuple[list[str], list[str]]:
+    """``(allowed, notes)``: sorted regimes with an edge, and one note per
+    excluded regime saying why. Edge = at least ``min_trades`` hold-out
+    trades, net return > 0 and Sharpe > 0 (NaN fails)."""
+    allowed: list[str] = []
+    notes: list[str] = []
+    for k in sorted(regimes):
+        s = regimes[k]
+        why = []
+        if s.n_trades < min_trades:
+            why.append(f"{s.n_trades} trades < min {min_trades}")
+        if not s.total_return > 0:
+            why.append(f"net return {s.total_return:.4f} <= 0")
+        if not s.sharpe > 0:
+            why.append(f"Sharpe {s.sharpe:.3f} <= 0")
+        if why:
+            notes.append(f"regime {k} excluded: " + ", ".join(why))
+        else:
+            allowed.append(k)
+    return allowed, notes
+
+
+def holdout_reasons(stats: Stats, cfg: GateConfig, *, ruined: bool) -> list[str]:
+    """Rejection reasons from the hold-out statistics alone (NaN-safe:
+    every comparison is written so that NaN fails)."""
+    st = stats
+    out: list[str] = []
+    if ruined:
+        out.append("hold-out backtest ruined (equity hit zero)")
+    if st.n_trades == 0:
+        out.append("hold-out has zero trades")
+    elif st.n_trades < cfg.min_trades:
+        out.append(f"hold-out trades {st.n_trades} < min {cfg.min_trades}")
+    if not st.total_return > 0:
+        out.append(
+            f"hold-out net return {st.total_return:.4f} <= 0 (no positive expectancy)"
+        )
+    if not st.sharpe >= cfg.min_sharpe:
+        out.append(
+            f"hold-out Sharpe {st.sharpe:.3f} < min {cfg.min_sharpe} (annualised)"
+        )
+    if not st.max_drawdown <= cfg.max_drawdown:
+        out.append(
+            f"hold-out max drawdown {st.max_drawdown:.3f} > max {cfg.max_drawdown}"
+        )
+    if math.isnan(st.profit_factor) or not st.profit_factor >= cfg.min_profit_factor:
+        out.append(
+            f"hold-out profit factor {_fmt(st.profit_factor)} < min "
+            f"{cfg.min_profit_factor}"
+        )
+    if not st.win_rate >= cfg.min_win_rate:
+        out.append(f"hold-out win rate {st.win_rate:.3f} < min {cfg.min_win_rate}")
+    return out
 
 
 def _periods_per_year(bars: pd.DataFrame) -> float:
@@ -221,32 +270,7 @@ def evaluate(
     except ValueError:
         pvalue = 1.0
 
-    if ho.ruined:
-        reasons.append("hold-out backtest ruined (equity hit zero)")
-    if st.n_trades == 0:
-        reasons.append("hold-out has zero trades")
-    elif st.n_trades < gate_cfg.min_trades:
-        reasons.append(f"hold-out trades {st.n_trades} < min {gate_cfg.min_trades}")
-    if not st.total_return > 0:
-        reasons.append(
-            f"hold-out net return {st.total_return:.4f} <= 0 (no positive expectancy)"
-        )
-    if not st.sharpe >= gate_cfg.min_sharpe:
-        reasons.append(
-            f"hold-out Sharpe {st.sharpe:.3f} < min {gate_cfg.min_sharpe} (annualised)"
-        )
-    if not st.max_drawdown <= gate_cfg.max_drawdown:
-        reasons.append(
-            f"hold-out max drawdown {st.max_drawdown:.3f} > max {gate_cfg.max_drawdown}"
-        )
-    if (
-        math.isnan(st.profit_factor)
-        or not st.profit_factor >= gate_cfg.min_profit_factor
-    ):
-        reasons.append(
-            f"hold-out profit factor {_fmt(st.profit_factor)} < min "
-            f"{gate_cfg.min_profit_factor}"
-        )
+    reasons += holdout_reasons(st, gate_cfg, ruined=ho.ruined)
     if not sweep.stable:
         reasons.append(f"parameter sweep unstable: {sweep.reason}")
     if not passes_cost_check(c2.stats, ruined=c2.ruined):
@@ -262,15 +286,20 @@ def evaluate(
             f"(deflated Sharpe, n_trials={n_trials})"
         )
 
-    regimes = _regime_stats(ho, label_regimes(full), ppy)
-    allowed = allowed_regimes(regimes)
+    regimes = _regime_stats(ho, label_regimes(full, gate_cfg.regime_window), ppy)
+    allowed, notes = allowed_regimes(regimes, gate_cfg.min_trades_per_regime)
     flags: list[str] = []
+    restricted_to: str | None = None
     if not allowed:
-        reasons.append("no regime shows an edge on the hold-out")
-    elif len(allowed) < len(REGIMES):
-        flags.append(
-            f"edge only in {allowed[0]} regime: restricted to it (stay out otherwise)"
-        )
+        reasons.append("no regime shows an edge on the hold-out: " + "; ".join(notes))
+    else:
+        flags += notes
+        if len(allowed) == 1:
+            restricted_to = allowed[0]
+            flags.append(
+                f"edge only in {restricted_to} regime: restricted to it "
+                "(stay out otherwise)"
+            )
 
     return Verdict(
         passed=not reasons,
@@ -285,6 +314,7 @@ def evaluate(
         interval=interval,
         params=dict(params),
         allowed_regimes=allowed,
+        restricted_to=restricted_to,
         flags=flags,
         pvalue=pvalue,
         n_trials=n_trials,

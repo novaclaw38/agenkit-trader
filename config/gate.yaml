@@ -8,3 +8,7 @@ min_profit_factor: 1.2          # gross win / gross loss; margin above 1.0 for e
 cost_multiplier: 2.0            # strategy must still pass with fees+slippage doubled
 max_trial_adjusted_pvalue: 0.05 # after correcting for number of configurations tried
 neighbour_tolerance: 0.5        # neighbouring parameters may lose at most 50% of best performance
+min_win_rate: 0.35             # sanity floor only: trend-following typically wins 35-45% of trades;
+                                # profit factor and Sharpe are the binding checks. PROPOSED, user to confirm
+min_trades_per_regime: 10       # a regime is only "allowed" with at least this many hold-out trades in it
+regime_window: 48               # bars of look-back for the efficiency-ratio trend/range labeller

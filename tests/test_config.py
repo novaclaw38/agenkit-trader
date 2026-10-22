@@ -77,6 +77,9 @@ def test_gate_rejects_bad_values() -> None:
             min_profit_factor=1.2,
             max_trial_adjusted_pvalue=0.05,
             neighbour_tolerance=0.5,
+            min_win_rate=0.35,
+            min_trades_per_regime=10,
+            regime_window=48,
         )
 
 
@@ -91,6 +94,9 @@ _GATE_OK: dict[str, float] = {
     "cost_multiplier": 2.0,
     "max_trial_adjusted_pvalue": 0.05,
     "neighbour_tolerance": 0.5,
+    "min_win_rate": 0.35,
+    "min_trades_per_regime": 10,
+    "regime_window": 48,
 }
 _BAD = [float("nan"), float("inf"), float("-inf")]
 
@@ -112,3 +118,32 @@ def test_gate_rejects_non_finite(field: str, bad: float) -> None:
 def test_gate_rejects_negative_min_sharpe() -> None:
     with pytest.raises(ValueError, match="min_sharpe"):
         GateConfig(**{**_GATE_OK, "min_sharpe": -0.1})  # type: ignore[arg-type]
+
+
+def test_gate_yaml_new_keys() -> None:
+    g = load_gate_config(Path(__file__).parents[1] / "config" / "gate.yaml")
+    assert g.min_win_rate == 0.35
+    assert g.min_trades_per_regime == 10
+    assert g.regime_window == 48
+
+
+@pytest.mark.parametrize(
+    ("field", "bad"),
+    [
+        ("min_win_rate", -0.01),
+        ("min_win_rate", 1.01),
+        ("min_trades_per_regime", 0),
+        ("min_trades_per_regime", 2.5),
+        ("regime_window", 0),
+        ("regime_window", -48),
+        ("regime_window", 4.5),
+    ],
+)
+def test_gate_rejects_bad_new_keys(field: str, bad: float) -> None:
+    with pytest.raises(ValueError, match=field):
+        GateConfig(**{**_GATE_OK, field: bad})  # type: ignore[arg-type]
+
+
+def test_gate_win_rate_bounds_inclusive() -> None:
+    GateConfig(**{**_GATE_OK, "min_win_rate": 0.0})  # type: ignore[arg-type]
+    GateConfig(**{**_GATE_OK, "min_win_rate": 1.0})  # type: ignore[arg-type]

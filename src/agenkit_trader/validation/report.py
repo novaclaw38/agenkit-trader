@@ -6,7 +6,8 @@
   Timeframe, Sharpe, Max Drawdown, Trades, Cost Sensitivity, Verdict) plus,
   per strategy, the evidence and every rejection reason.
 * ``path.with_suffix('.json')``: the full evidence, machine-readable.
-* ``path.parent / 'deployed.json'``: a JSON list of
+* ``path.parent / 'deployed.json'`` (written LAST, after both report files,
+  so a crash can never leave a new deployed.json beside an old report): a JSON list of
   ``{name, symbol, interval, params, allowed_regimes}`` for passing verdicts
   only; an empty list when nothing passes, so a stale file never survives.
 
@@ -92,6 +93,7 @@ def evidence(v: Verdict) -> dict[str, Any]:
         "reasons": v.reasons,
         "flags": v.flags,
         "allowed_regimes": v.allowed_regimes,
+        "restricted_to": v.restricted_to,
         "pvalue": v.pvalue,
         "n_trials": v.n_trials,
         "ruined": v.ruined,
@@ -183,4 +185,5 @@ def write_report(verdicts: list[Verdict], path: Path) -> None:
     evidence_text = _dumps([evidence(v) for v in verdicts])
     atomic_write_text(path, "\n".join(lines))
     atomic_write_text(path.with_suffix(".json"), evidence_text)
+    # order matters: deployed.json must be the last file replaced
     atomic_write_text(path.parent / "deployed.json", deployed_text)
