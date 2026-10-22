@@ -232,11 +232,6 @@ def test_reducing_order_still_blocked_by_halt() -> None:
     assert check(o, state(**LOSING, halted=True)).reason == Reason.HALTED
 
 
-def test_reducing_order_still_needs_stop() -> None:
-    o = order(side="sell", qty=0.1, stop_price=None)
-    assert check(o, state(**LOSING)).reason == Reason.NO_STOP
-
-
 def test_order_that_flips_position_is_not_exempt() -> None:
     o = order(side="sell", qty=0.2, stop_price=51_000.0)
     d = check(o, state(**LOSING))
@@ -327,3 +322,57 @@ def test_allowed_orders_never_exceed_limits(
     assert (day_start - equity) / day_start < CFG.max_daily_loss
     assert (peak - equity) / peak < CFG.max_drawdown
     assert abs(pos_qty + signed) * price / equity <= CFG.max_leverage + 1e-9
+
+
+# --- fix round 1 ------------------------------------------------------------
+
+
+def test_qty_not_lot_multiple_rejected() -> None:
+    o = order(qty=0.0119, price_ref=1000.0, stop_price=100.0)
+    d = check(o)
+    assert (d.allowed, d.reason) == (False, Reason.QTY_NOT_LOT_MULTIPLE)
+    assert Reason.QTY_NOT_LOT_MULTIPLE == "qty_not_lot_multiple"
+
+
+def test_exact_lot_multiple_allowed() -> None:
+    d = check(order(qty=0.011, price_ref=1000.0, stop_price=100.0))
+    assert d.allowed, d.reason
+
+
+def test_closing_long_without_stop_allowed() -> None:
+    o = order(side="sell", qty=0.1, stop_price=None)
+    d = check(o, state(**LOSING))
+    assert d.allowed, d.reason
+
+
+def test_closing_long_with_stop_on_wrong_side_allowed() -> None:
+    o = order(side="sell", qty=0.05, stop_price=40_000.0)
+    assert check(o, state(**LOSING)).allowed
+
+
+def test_increasing_without_stop_rejected() -> None:
+    s = state(positions={"BTCUSDT": Position("BTCUSDT", 0.001, 50_000.0)})
+    assert check(order(stop_price=None), s).reason == Reason.NO_STOP
+
+
+def test_flip_without_stop_rejected() -> None:
+    o = order(side="sell", qty=0.2, stop_price=None)
+    assert check(o, state(**LOSING)).reason == Reason.NO_STOP
+
+
+@settings(max_examples=400, deadline=None)
+@given(
+    equity=st.floats(1.0, 1e5),
+    price=st.floats(1.0, 1e5),
+    stop_frac=st.floats(0.5, 0.999),
+    qty=st.floats(1e-4, 10.0),
+)
+def test_allowed_exact_qty_within_risk(
+    equity: float, price: float, stop_frac: float, qty: float
+) -> None:
+    stop = price * stop_frac
+    o = order(qty=qty, price_ref=price, stop_price=stop)
+    d = check(o, state(equity=equity))
+    if d.allowed:
+        eps = 1e-9 * max(1.0, equity)
+        assert qty * abs(price - stop) <= equity * CFG.max_risk_per_trade + eps

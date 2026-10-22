@@ -21,18 +21,19 @@ class KillSwitch:
         self._flattened = False
         self._errors: deque[datetime] = deque()
 
-    def trigger(self, reason: str) -> None:
+    def trigger(self, reason: str) -> bool:
         """Flatten all positions then halt. Idempotent once a flatten succeeds.
 
         If flattening fails the switch is still halted (fail closed) and a
-        later trigger retries the flatten.
+        later trigger retries the flatten. Returns True if positions are
+        flattened (now or by an earlier trigger), False if flatten_all raised.
         """
         if self._flattened:
             self.halted = True
             self.log.write(
                 "kill_switch", {"reason": reason}, {"halted": True}, "already_halted"
             )
-            return
+            return True
         error: str | None = None
         try:
             self.venue.flatten_all()
@@ -47,6 +48,7 @@ class KillSwitch:
             {"halted": True, "flattened": self._flattened, "error": error},
             "flattened" if self._flattened else "flatten_failed",
         )
+        return self._flattened
 
     def record_api_error(self, now: datetime) -> None:
         window = timedelta(seconds=self.cfg.error_window_s)

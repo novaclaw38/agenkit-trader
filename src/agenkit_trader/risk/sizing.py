@@ -19,12 +19,19 @@ def _pos_finite(x: object) -> bool:
 
 def floor_to_lot(qty: float, lot: float) -> float:
     """Round ``qty`` down to a whole number of lots, never up."""
-    n = math.floor(qty / lot)
+    # Snap values within float noise of a lot boundary (0.011 / 0.001 is
+    # 10.999...), but never return more than qty beyond relative 1e-12.
+    n = math.floor(qty / lot + 1e-9)
     q = n * lot
-    while n > 0 and q > qty:  # guard against float error rounding up
+    while n > 0 and q > qty * (1 + 1e-12):
         n -= 1
         q = n * lot
     return q if n > 0 else 0.0
+
+
+def is_lot_multiple(qty: float, lot: float) -> bool:
+    """True if ``qty`` is a whole number of lots up to float noise."""
+    return abs(qty - floor_to_lot(qty, lot)) <= lot * 1e-9
 
 
 def size_position(

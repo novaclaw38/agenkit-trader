@@ -97,3 +97,15 @@ def test_reset_clears_error_window(tmp_path: Path) -> None:
     ks.reset("RESUME")
     ks.record_api_error(T0 + timedelta(seconds=10))
     assert not ks.halted
+
+
+def test_trigger_returns_flattened_ok(tmp_path: Path) -> None:
+    ks, v, _ = make(tmp_path)
+    v.fail_flatten = True
+    assert ks.trigger("a") is False
+    assert ks.halted
+    v.fail_flatten = False
+    assert ks.trigger("b") is True
+    assert v.flatten_calls == 2
+    assert ks.trigger("c") is True
+    assert v.flatten_calls == 2

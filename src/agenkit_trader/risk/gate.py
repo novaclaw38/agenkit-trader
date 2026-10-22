@@ -22,7 +22,7 @@ from typing import Any
 from agenkit_trader.config import RiskConfig
 from agenkit_trader.execution.venue import AccountState, Order, Position, SymbolRules
 from agenkit_trader.log import DecisionLog
-from agenkit_trader.risk.sizing import floor_to_lot
+from agenkit_trader.risk.sizing import floor_to_lot, is_lot_multiple
 
 
 class Reason(StrEnum):
@@ -35,6 +35,7 @@ class Reason(StrEnum):
     STALE_DATA = "stale_data"
     RULES_UNAVAILABLE = "rules_unavailable"
     BELOW_LOT = "below_lot"
+    QTY_NOT_LOT_MULTIPLE = "qty_not_lot_multiple"
     BELOW_MIN_NOTIONAL = "below_min_notional"
     RISK_PER_TRADE = "risk_per_trade"
     DAILY_LOSS = "daily_loss"
@@ -83,10 +84,15 @@ def _valid_order(o: object) -> Reason | None:
         return Reason.INVALID_ORDER
     if not _pos(o.qty) or not _pos(o.price_ref):
         return Reason.INVALID_ORDER
+    if o.stop_price is not None and not _pos(o.stop_price):
+        return Reason.INVALID_ORDER
+    return None
+
+
+def _stop_rule(o: Order) -> Reason | None:
+    """Stop requirements; applied only to opening/increasing orders."""
     if o.stop_price is None:
         return Reason.NO_STOP
-    if not _pos(o.stop_price):
-        return Reason.INVALID_ORDER
     if o.side == "buy" and not o.stop_price < o.price_ref:
         return Reason.STOP_WRONG_SIDE
     if o.side == "sell" and not o.stop_price > o.price_ref:
@@ -171,10 +177,12 @@ class RiskGate:
         if not _valid_rules(rules):
             return _reject(Reason.RULES_UNAVAILABLE)
 
-        assert order.stop_price is not None  # checked in _valid_order
-        qty = floor_to_lot(order.qty, rules.lot)
-        if qty < rules.lot or qty <= 0:
+        if floor_to_lot(order.qty, rules.lot) <= 0:
             return _reject(Reason.BELOW_LOT)
+        if not is_lot_multiple(order.qty, rules.lot):
+            return _reject(Reason.QTY_NOT_LOT_MULTIPLE)
+        # All checks run on the exact submitted quantity.
+        qty = order.qty
         price = order.price_ref
         if qty * price < rules.min_notional:
             return _reject(Reason.BELOW_MIN_NOTIONAL)
@@ -186,6 +194,10 @@ class RiskGate:
         reducing = cur * signed < 0 and qty <= abs(cur)
         if reducing:
             return Decision(True, Reason.OK.value, qty)
+        stop_bad = _stop_rule(order)
+        if stop_bad is not None:
+            return _reject(stop_bad)
+        assert order.stop_price is not None
 
         equity = state.equity
         risk_budget = equity * cfg.max_risk_per_trade
