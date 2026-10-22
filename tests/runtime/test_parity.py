@@ -46,7 +46,8 @@ from fakes import FakeVenue
 STEP = pd.Timedelta(hours=1)
 SYM = "BTCUSDT"
 N = 140
-# daily-loss / drawdown kill switch off: the simulator does not model it
+# kill switch off for the long scenario (its losses would trip it); the
+# halt scenarios below run with the committed limits
 RISK = RiskConfig(max_daily_loss=1.0, max_drawdown=1.0)
 RT = RuntimeConfig()
 FREE = CostModel(0.0, 0.0, 0.0, 0.0)
@@ -104,12 +105,22 @@ def scenario() -> tuple[pd.DataFrame, pd.Series]:
 
 
 def run_runtime(
-    tmp_path: Path, bars: pd.DataFrame, sig: pd.Series
-) -> tuple[list[dict[str, Any]], int]:
+    tmp_path: Path,
+    bars: pd.DataFrame,
+    sig: pd.Series,
+    risk: RiskConfig = RISK,
+    costs: CostModel = FREE,
+    first: int = 20,
+) -> tuple[list[dict[str, Any]], int, int | None]:
+    """Drive the real Runtime bar by bar. The harness plays the exchange:
+    stop triggers (simulator's fill rule), fills debit ``costs`` from the
+    venue equity, and a kill-switch flatten closes at the current close.
+    Returns (trades, skipped entries, bar of the halt or None)."""
+    n = len(bars)
     venue = FakeVenue()
     log = DecisionLog(tmp_path / "decisions.jsonl")
-    kill = KillSwitch(venue, log, RISK)
-    gate = RiskGate(RISK, venue.symbol_rules, log)
+    kill = KillSwitch(venue, log, risk)
+    gate = RiskGate(risk, venue.symbol_rules, log)
     dep = Deployment("scripted", SYM, "1h", {"k": 1}, list(REGIMES))
     clock = {"now": venue.now}
     rt = Runtime(
@@ -124,16 +135,68 @@ def run_runtime(
         state_path=tmp_path / "state.json",
         init_state=True,
     )
-    realized = 1000.0
+    rate = costs.per_side_rate
+    acc = {"realized": 1000.0, "k": first}
     trades: list[dict[str, Any]] = []
-    open_t: dict[str, Any] | None = None
-    seen_orders = 0
-    started = False
-    for k in range(20, N):
-        bar = bars.iloc[k]
-        # --- the exchange during bar k: the reduce-only stop may trigger ---
+    cur: dict[str, Any] = {}
+
+    def close_trade(qty: float, entry: float, price: float, reason: str) -> None:
+        acc["realized"] += qty * (price - entry) - abs(qty) * price * rate
+        cur.update(exit_bar=acc["k"], reason=reason, exit_price=price)
+        trades.append(dict(cur))
+        cur.clear()
+
+    real_place, real_flatten = venue.place_order, venue.flatten_all
+
+    def place(order: Any) -> Any:
+        before = venue.positions.get(SYM)
+        fill = real_place(order)
+        if order.reduce_only:  # strategy exit at the close of bar k
+            assert before is not None
+            target = float(np.sign(sig.iloc[acc["k"]]))
+            reason = "flip" if target == -np.sign(before.qty) else "signal"
+            close_trade(before.qty, before.entry_price, order.price_ref, reason)
+        else:
+            acc["realized"] -= order.qty * order.price_ref * rate
+            cur.update(
+                entry_bar=acc["k"],
+                side=1.0 if order.side == "buy" else -1.0,
+                qty=order.qty,
+                stop=order.stop_price,
+            )
+        venue.equity = acc["realized"]  # flat or just entered at price_ref
+        return fill
+
+    def flatten() -> None:
         pos = venue.positions.get(SYM)
-        if pos is not None and started:
+        if pos is not None:
+            close_trade(
+                pos.qty, pos.entry_price, float(bars["close"].iloc[acc["k"]]), "halt"
+            )
+        real_flatten()
+        venue.equity = acc["realized"]
+
+    venue.place_order = place  # type: ignore[method-assign]
+    venue.flatten_all = flatten  # type: ignore[method-assign]
+
+    def cycle(k: int, now: pd.Timestamp, closed_upto: int) -> None:
+        forming = (
+            bars.iloc[[closed_upto]].copy()
+            if closed_upto < n
+            else bars.iloc[[-1]].copy()
+        )
+        forming.index = pd.DatetimeIndex([bars.index[closed_upto - 1] + STEP])
+        venue.bars[SYM] = pd.concat([bars.iloc[:closed_upto], forming])
+        clock["now"] = venue.now = now.to_pydatetime()
+        rt.cycle()
+
+    halt_bar: int | None = None
+    for k in range(first, n):
+        acc["k"] = k
+        bar = bars.iloc[k]
+        pos = venue.positions.get(SYM)
+        if pos is not None and k > first:
+            # --- the exchange during bar k: the reduce-only stop may trigger
             fill = None
             for st in venue.stops:
                 sp = st.stop_price
@@ -149,68 +212,49 @@ def run_runtime(
                     elif bar["high"] >= sp:
                         fill = sp
             if fill is not None:
-                realized += pos.qty * (fill - pos.entry_price)
+                close_trade(pos.qty, pos.entry_price, fill, "stop")
                 venue.positions.pop(SYM)
                 venue.stops.clear()
-                assert open_t is not None
-                open_t.update(exit_bar=k, reason="stop", exit_price=fill)
-                trades.append(open_t)
-                open_t = None
+                venue.equity = acc["realized"]
+                # the runtime polls within the bar: one cycle after the fill
+                cycle(k, bars.index[k] + pd.Timedelta(minutes=30), k)
+                if kill.halted:
+                    halt_bar = k
+                    break
         # --- venue state at the close of bar k ---
         pos = venue.positions.get(SYM)
         close = float(bar["close"])
-        venue.equity = realized + (pos.qty * (close - pos.entry_price) if pos else 0.0)
-        forming = bars.iloc[[k]].copy()
-        forming.index = forming.index + STEP
-        venue.bars[SYM] = pd.concat([bars.iloc[: k + 1], forming])
-        now = (bars.index[k] + STEP + pd.Timedelta(seconds=30)).to_pydatetime()
-        clock["now"] = venue.now = now
-        if not started:
-            rt.start()
-            started = True
-        rt.cycle()
-        assert not kill.halted
-        for o in venue.orders[seen_orders:]:
-            if o.reduce_only:  # strategy exit at the close of bar k
-                assert open_t is not None
-                realized += open_t["signed"] * (o.price_ref - open_t["entry_price"])
-                target = float(np.sign(sig.iloc[k]))
-                reason = "flip" if target == -open_t["side"] else "signal"
-                open_t.update(exit_bar=k, reason=reason, exit_price=o.price_ref)
-                trades.append(open_t)
-                open_t = None
-            else:
-                side = 1.0 if o.side == "buy" else -1.0
-                stops = [s for s in venue.stops if s.client_id != ""]
-                assert stops and stops[-1].stop_price == o.stop_price
-                assert stops[-1].qty == o.qty
-                open_t = {
-                    "entry_bar": k,
-                    "side": side,
-                    "qty": o.qty,
-                    "stop": o.stop_price,
-                    "entry_price": o.price_ref,
-                    "signed": side * o.qty,
-                }
-        seen_orders = len(venue.orders)
-        # entry price as the venue records it (used by the stop/exit P&L)
-        p = venue.positions.get(SYM)
-        if p is not None:
-            assert isinstance(p, Position) and p.entry_price == close
-    if open_t is not None:
-        open_t.update(
-            exit_bar=N - 1, reason="end", exit_price=float(bars["close"].iloc[-1])
+        venue.equity = acc["realized"] + (
+            pos.qty * (close - pos.entry_price) if pos else 0.0
         )
-        trades.append(open_t)
+        if k == first:
+            clock["now"] = venue.now = (
+                bars.index[k] + STEP + pd.Timedelta(seconds=30)
+            ).to_pydatetime()
+            venue.bars[SYM] = bars.iloc[: k + 1]
+            rt.start()
+        cycle(k, bars.index[k] + STEP + pd.Timedelta(seconds=30), k + 1)
+        if kill.halted:
+            halt_bar = k
+            break
+        if cur:
+            stops = [s for s in venue.stops if s.client_id != ""]
+            assert stops and stops[-1].stop_price == cur["stop"]
+            assert stops[-1].qty == cur["qty"]
+            p = venue.positions.get(SYM)
+            assert isinstance(p, Position) and p.entry_price == close
+    if cur and halt_bar is None:
+        acc["k"] = n - 1
+        p = venue.positions[SYM]
+        close_trade(p.qty, p.entry_price, float(bars["close"].iloc[-1]), "end")
     skipped = 0
-
     for line in (tmp_path / "decisions.jsonl").read_text().splitlines():
         r = json.loads(line)
         if r["kind"] == "order" and r["inputs"]["kind"] == "entry":
             skipped += r["result"] in ("rejected", "refused_qty_mismatch")
         elif r["kind"] == "entry" and r["result"] in ("size_zero", "no_atr"):
             skipped += 1
-    return trades, skipped
+    return trades, skipped, halt_bar
 
 
 def _sim_rows(res: Any) -> list[tuple[Any, ...]]:
@@ -233,23 +277,18 @@ def _sim_rows(res: Any) -> list[tuple[Any, ...]]:
     return out
 
 
+def _rt_rows(trades: list[dict[str, Any]]) -> list[tuple[Any, ...]]:
+    keys = ("entry_bar", "side", "qty", "stop", "exit_bar", "reason", "exit_price")
+    return [tuple(t[k] for k in keys) for t in trades]
+
+
 def test_simulator_matches_runtime_loop(tmp_path: Path) -> None:
     bars, sig = scenario()
     rules = FakeVenue().rules[SYM]
     res = run_backtest_runtime(bars, sig, FREE, None, 1000.0, RISK, RT, rules)
-    rt_trades, rt_skipped = run_runtime(tmp_path, bars, sig)
-    rt_rows = [
-        (
-            t["entry_bar"],
-            t["side"],
-            t["qty"],
-            t["stop"],
-            t["exit_bar"],
-            t["reason"],
-            t["exit_price"],
-        )
-        for t in rt_trades
-    ]
+    rt_trades, rt_skipped, rt_halt = run_runtime(tmp_path, bars, sig)
+    assert rt_halt is None and not res.halted
+    rt_rows = _rt_rows(rt_trades)
     sim_rows = _sim_rows(res)
     assert sim_rows == rt_rows
     assert res.skipped_entries == rt_skipped == 1
@@ -267,3 +306,65 @@ def test_parity_scenario_timeline_is_not_trivial() -> None:
     bars, sig = scenario()
     assert (sig.iloc[34:42] == 1.0).all()  # stopped at 34, signal still long
     assert timedelta(hours=N - 1) == bars.index[-1] - bars.index[0]
+
+
+def halt_scenario(gap_stop: bool) -> tuple[pd.DataFrame, pd.Series]:
+    """Two stop-outs, then a third long whose close drop trips the 3% daily
+    loss with the position OPEN (gap_stop=False), or one long stopped by a
+    gap that alone loses more than 3% (gap_stop=True)."""
+    n = 40
+    idx = pd.date_range("2026-01-01", periods=n, freq="1h", tz="UTC")
+    c = np.full(n, 100.0)
+    b = pd.DataFrame(
+        {"open": c, "high": c + 1.0, "low": c - 1.0, "close": c.copy(), "volume": 1.0},
+        index=idx,
+    )
+    s = pd.Series(0.0, index=idx)
+    if gap_stop:
+        s.iloc[15:30] = 1.0
+        b.iloc[17, :4] = [75.0, 76.0, 74.0, 75.0]
+        return b, s
+    s.iloc[15:17] = 1.0
+    b.iloc[16, b.columns.get_loc("low")] = 93.5
+    s.iloc[18:20] = 1.0
+    b.iloc[19, b.columns.get_loc("low")] = 92.0
+    s.iloc[21:30] = 1.0
+    b.iloc[22, [b.columns.get_loc("low"), b.columns.get_loc("close")]] = [91.6, 91.6]
+    return b, s
+
+
+COSTS = CostModel(0.002, 0.0, 0.0, 0.0)
+
+
+def test_kill_switch_halt_with_open_position_matches(tmp_path: Path) -> None:
+    bars, sig = halt_scenario(gap_stop=False)
+    risk = RiskConfig()  # committed limits: 3% daily loss, 10% drawdown
+    rules = FakeVenue().rules[SYM]
+    res = run_backtest_runtime(bars, sig, COSTS, None, 1000.0, risk, RT, rules)
+    rt_trades, _, rt_halt = run_runtime(tmp_path, bars, sig, risk, COSTS, first=14)
+    assert _sim_rows(res) == _rt_rows(rt_trades)
+    assert [r[5] for r in _sim_rows(res)] == ["stop", "stop", "halt"]
+    assert res.halted and res.halt_reason == "daily_loss"
+    assert rt_halt == 22 and res.halt_time == bars.index[22]
+
+
+def test_kill_switch_halt_after_gap_stop_matches(tmp_path: Path) -> None:
+    bars, sig = halt_scenario(gap_stop=True)
+    risk = RiskConfig()
+    rules = FakeVenue().rules[SYM]
+    res = run_backtest_runtime(bars, sig, COSTS, None, 1000.0, risk, RT, rules)
+    rt_trades, _, rt_halt = run_runtime(tmp_path, bars, sig, risk, COSTS, first=14)
+    assert _sim_rows(res) == _rt_rows(rt_trades)
+    assert [r[5] for r in _sim_rows(res)] == ["stop"]
+    assert res.halted and res.halt_reason == "daily_loss"
+    assert rt_halt == 17 and res.halt_time == bars.index[17]
+
+
+def test_costs_parity_without_halt(tmp_path: Path) -> None:
+    bars, sig = scenario()
+    rules = FakeVenue().rules[SYM]
+    res = run_backtest_runtime(bars, sig, COSTS, None, 1000.0, RISK, RT, rules)
+    rt_trades, rt_skipped, rt_halt = run_runtime(tmp_path, bars, sig, RISK, COSTS)
+    assert rt_halt is None
+    assert _sim_rows(res) == _rt_rows(rt_trades)
+    assert res.skipped_entries == rt_skipped

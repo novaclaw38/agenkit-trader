@@ -82,13 +82,18 @@ class BacktestResult:
     ``position``, ``n_bars`` and ``ret``. ``ruined`` is True if equity hit
     zero (it then stays at 0 and no further trades occur); it never raises.
     ``skipped_entries`` counts entries the runtime-policy simulator
-    (``runtime_policy.py``) did not open; always 0 for ``run_backtest``."""
+    (``runtime_policy.py``) did not open; ``halted``/``halt_reason``/
+    ``halt_time`` record its simulated kill-switch halt. ``run_backtest``
+    never sets them (0 / False / None)."""
 
     equity: pd.Series
     trades: pd.DataFrame
     stats: Stats
     ruined: bool = False
     skipped_entries: int = 0
+    halted: bool = False
+    halt_reason: str | None = None
+    halt_time: pd.Timestamp | None = None
 
 
 def _bar_step(bars: pd.DataFrame) -> pd.Timedelta:

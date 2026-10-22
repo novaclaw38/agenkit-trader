@@ -374,3 +374,136 @@ def test_deterministic() -> None:
     a, z = run(b, s), run(b, s)
     assert a.equity.equals(z.equity) and a.trades.equals(z.trades)
     assert a.stats == z.stats and a.skipped_entries == z.skipped_entries
+
+
+# ---------------------------------------------------------------- kill switch
+
+
+def test_daily_loss_halt_after_stop_fill_is_permanent() -> None:
+    b = flat_bars(80)
+    b.loc[b.index[22], ["open", "high", "low", "close"]] = [60.0, 61.0, 59.0, 60.0]
+    res = run(b, sig(b, {(20, 30): 1.0, (40, 50): 1.0, (60, 70): -1.0}))
+    assert res.halted and res.halt_reason == "daily_loss"
+    assert res.halt_time == b.index[22]
+    assert list(res.trades["exit_reason"]) == ["stop"]  # flat already
+    assert (res.equity.iloc[22:] == res.equity.iloc[22]).all()
+    assert res.equity.iloc[22] == pytest.approx(1000.0 - QTY * 40.0)
+
+
+def test_halt_at_close_flattens_with_costs() -> None:
+    c = CostModel(0.001, 0.0, 0.0, 0.0)
+    b = flat_bars()
+    b.loc[b.index[22], ["low", "close"]] = [95.0, 96.0]
+    risk = RiskConfig(max_daily_loss=0.005, max_drawdown=1.0)
+    res = run(b, sig(b, {(20, 40): 1.0}), costs=c, risk=risk)
+    assert res.halted and res.halt_reason == "daily_loss"
+    t = res.trades.iloc[-1]
+    assert t["exit_reason"] == "halt" and t["exit_price"] == 96.0
+    q = t["qty"]
+    after = 1000.0 - q * 100 * 0.001 - q * 4.0 - q * 96.0 * 0.001
+    assert res.equity.iloc[23] == pytest.approx(after)
+    assert (res.equity.iloc[23:] == res.equity.iloc[23]).all()
+    assert len(res.trades) == 1
+
+
+def test_drawdown_halt_reason() -> None:
+    b = flat_bars()
+    b.loc[b.index[22], ["low", "close"]] = [95.0, 96.0]
+    res = run(b, sig(b, {(20, 40): 1.0}), risk=RiskConfig(max_drawdown=0.005))
+    assert res.halted and res.halt_reason == "drawdown"
+
+
+def test_halt_threshold_is_at_or_above_the_limit() -> None:
+    b = flat_bars()
+    b.loc[b.index[22], ["low", "close"]] = [95.0, 96.0]
+    loss = (1000.0 - (1000.0 + QTY * -4.0)) / 1000.0
+    at = run(b, sig(b, {(20, 40): 1.0}), risk=RiskConfig(max_daily_loss=loss))
+    above = run(b, sig(b, {(20, 40): 1.0}), risk=RiskConfig(max_daily_loss=loss * 1.01))
+    assert at.halted and not above.halted
+
+
+def test_daily_loss_resets_at_the_utc_day_boundary() -> None:
+    b = flat_bars(60)
+    b.loc[b.index[22], ["low", "close"]] = [97.0, 97.6]
+    b.loc[b.index[32], ["low", "close"]] = [97.0, 97.6]
+    risk = RiskConfig(max_daily_loss=0.005, max_drawdown=1.0)
+    # day 1: -0.4% ; day 2 (from the 00:00 close): another -0.4% -> no halt
+    res = run(b, sig(b, {(20, 22): 1.0, (30, 32): 1.0}), risk=risk)
+    assert not res.halted
+    assert res.stats.n_trades == 2
+    b2 = b.copy()
+    b2.loc[b2.index[16], ["low", "close"]] = [97.0, 97.6]
+    same_day = run(b2, sig(b2, {(14, 16): 1.0, (20, 22): 1.0}), risk=risk)
+    assert same_day.halted and same_day.halt_reason == "daily_loss"
+
+
+def test_research_engine_never_halts() -> None:
+    b = flat_bars()
+    r = run_backtest(b, sig(b, {}), FREE, None, 1000.0)
+    assert not r.halted and r.halt_reason is None and r.halt_time is None
+
+
+# ---------------------------------------------------------------- segments
+
+
+def test_prev_signal_suppresses_entry_at_segment_start() -> None:
+    b = flat_bars(80)
+    warm, rest = b.iloc[:40], b.iloc[40:]
+    s = sig(rest, {(0, 20): 1.0})
+    fresh = run(rest, s, warmup=warm)
+    cont = run(rest, s, warmup=warm, prev_signal=1.0)
+    assert (
+        fresh.stats.n_trades == 1
+        and fresh.trades.iloc[0]["entry_time"] == rest.index[1]
+    )
+    assert cont.stats.n_trades == 0 and cont.skipped_entries == 0
+    flip = run(rest, s, warmup=warm, prev_signal=-1.0)
+    assert flip.stats.n_trades == 1
+
+
+# ---------------------------------------------------------------- funding/stop
+
+
+def test_intrabar_funding_is_paid_before_a_stop_in_the_same_bar() -> None:
+    idx = pd.date_range("2024-01-01", periods=60, freq="4h", tz="UTC")
+    b = flat_bars(60).set_axis(idx)
+    b.loc[b.index[25], "low"] = 93.0
+    mid = b.index[25] + pd.Timedelta(hours=2)  # funding inside bar 25
+    f = pd.Series([0.01], index=[mid])
+    res = run(b, sig(b, {(20, 40): 1.0}), funding=f)
+    assert res.trades.iloc[0]["exit_reason"] == "stop"
+    assert res.equity.iloc[-1] == pytest.approx(1000.0 - QTY * 6.0 - QTY * 100 * 0.01)
+
+
+# ---------------------------------------------------------------- ATR
+
+
+def test_precomputed_atr_equals_runtime_atr_on_every_window() -> None:
+    from agenkit_trader.backtest.runtime_policy import atr_series
+    from agenkit_trader.runtime.loop import atr
+
+    for seed in range(3):
+        b, _ = _random(seed, n=1600)
+        a = atr_series(b, 14)
+        for end in range(1, len(b) + 1, 7):
+            want = atr(b.iloc[max(0, end - RT.bars_limit) : end], 14)
+            got = a[end - 1]
+            assert (math.isnan(want) and math.isnan(got)) or want == got, end
+
+
+def test_rules_min_notional_skips_small_entries() -> None:
+    b = flat_bars()
+    big = SymbolRules(tick=0.1, lot=0.001, min_notional=500.0)  # 166 < 500
+    res = run(b, sig(b, {(20, 30): 1.0}), rules=big)
+    assert res.stats.n_trades == 0 and res.skipped_entries == 1
+
+
+def test_stop_in_the_last_bar_of_a_utc_day_halts_on_that_day() -> None:
+    # bar 23 (23:00-24:00) gaps through the stop; its close is the next UTC
+    # day, where day-start equity resets. The runtime polls within the bar,
+    # so it sees the loss on the old day and halts.
+    b = flat_bars(60)
+    b.loc[b.index[23], ["open", "high", "low", "close"]] = [60.0, 61.0, 59.0, 60.0]
+    res = run(b, sig(b, {(20, 40): 1.0}), risk=RiskConfig(max_drawdown=1.0))
+    assert res.halted and res.halt_reason == "daily_loss"
+    assert res.halt_time == b.index[23]
