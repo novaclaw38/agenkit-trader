@@ -209,12 +209,21 @@ def evaluate(
     interval: str = "",
     funding: pd.Series | None = None,
     equity0: float = 1000.0,
+    n_trials: int | None = None,
 ) -> Verdict:
-    """Run the full validation protocol (module docstring) on one strategy."""
+    """Run the full validation protocol (module docstring) on one strategy.
+
+    ``n_trials`` is the trial count the deflated Sharpe is tested against. When
+    given, the caller has already recorded this strategy's grid points in
+    ``counter`` (see ``evaluate_candidates``) and the counter is not touched;
+    when omitted, this strategy's grid points are added here and the new
+    cumulative total is used.
+    """
     train, hold = split_by_time(bars, gate_cfg.holdout_frac)
     full = pd.concat([train, hold])
     grid = strategy.param_grid
-    n_trials = counter.add(len(grid_points(grid)))
+    if n_trials is None:
+        n_trials = counter.add(len(grid_points(grid)))
     # the engine ignores funding outside each segment's span
     tr_fund = ho_fund = funding
 
@@ -312,3 +321,52 @@ def evaluate(
         sweep=sweep,
         ruined=ho.ruined,
     )
+
+
+@dataclass
+class Candidate:
+    """One strategy x symbol to run through ``evaluate``."""
+
+    strategy: Strategy
+    bars: pd.DataFrame
+    aux: dict[str, pd.Series]
+    symbol: str = ""
+    interval: str = ""
+    funding: pd.Series | None = None
+
+
+def evaluate_candidates(
+    candidates: list[Candidate],
+    costs: CostModel,
+    gate_cfg: GateConfig,
+    counter: TrialCounter,
+    *,
+    equity0: float = 1000.0,
+) -> list[Verdict]:
+    """Evaluate every candidate against the same, final trial count.
+
+    Before any candidate is evaluated, the grid points of ALL candidates are
+    recorded in ``counter`` (one atomic, locked add); every candidate is then
+    tested with that final total, so candidate order cannot change the
+    deflated-Sharpe bar.
+    """
+    if not candidates:
+        return []
+    n_new = sum(len(grid_points(c.strategy.param_grid)) for c in candidates)
+    n_trials = counter.add(n_new)
+    return [
+        evaluate(
+            c.strategy,
+            c.bars,
+            c.aux,
+            costs,
+            gate_cfg,
+            counter,
+            symbol=c.symbol,
+            interval=c.interval,
+            funding=c.funding,
+            equity0=equity0,
+            n_trials=n_trials,
+        )
+        for c in candidates
+    ]

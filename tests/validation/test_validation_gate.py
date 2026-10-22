@@ -210,3 +210,47 @@ def test_no_regime_edge_rejects(tmp_path, monkeypatch) -> None:
     )
     assert not v.passed
     assert any("no regime" in r for r in v.reasons)
+
+
+def _three_candidates() -> list:
+    from agenkit_trader.validation.gate import Candidate
+
+    bars, aux = market(1)
+    bars2, aux2 = market(2, n_noise=5)
+    return [
+        Candidate(FeatureStrategy(), bars, aux, symbol="A"),
+        Candidate(SpikeStrategy(), bars2, aux2, symbol="B"),
+        Candidate(PeekingStrategy(), bars, aux, symbol="C"),
+    ]
+
+
+def test_all_candidates_use_final_trial_total(tmp_path) -> None:
+    from agenkit_trader.validation.gate import evaluate_candidates
+
+    c = TrialCounter(tmp_path / "t.json")
+    c.add(7)
+    vs = evaluate_candidates(_three_candidates(), costs(), gate_cfg(), c)
+    assert c.total == 7 + 5 + 5 + 3
+    assert vs[0].n_trials == vs[-1].n_trials == c.total
+    assert {v.n_trials for v in vs} == {20}
+
+
+def test_pvalue_independent_of_candidate_order(tmp_path) -> None:
+    from agenkit_trader.validation.gate import evaluate_candidates
+
+    cands = _three_candidates()
+    a = evaluate_candidates(cands, costs(), gate_cfg(), TrialCounter(tmp_path / "a"))
+    b = evaluate_candidates(
+        cands[::-1], costs(), gate_cfg(), TrialCounter(tmp_path / "b")
+    )
+    pa = {v.symbol: (v.pvalue, v.n_trials) for v in a}
+    pb = {v.symbol: (v.pvalue, v.n_trials) for v in b}
+    assert pa == pb
+
+
+def test_explicit_n_trials_does_not_touch_counter(tmp_path) -> None:
+    bars, aux = market(1)
+    c = TrialCounter(tmp_path / "t.json")
+    v = evaluate(FeatureStrategy(), bars, aux, costs(), gate_cfg(), c, n_trials=42)
+    assert v.n_trials == 42
+    assert c.total == 0

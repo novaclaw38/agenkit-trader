@@ -20,7 +20,7 @@ from agenkit_trader.data.align import align_asof
 from agenkit_trader.data.archive import load_funding, load_klines
 from agenkit_trader.strategies import REGISTRY
 from agenkit_trader.strategies.funding_reversion import FUNDING_AVAILABLE_LAG
-from agenkit_trader.validation.gate import Verdict, evaluate
+from agenkit_trader.validation.gate import Candidate, evaluate_candidates
 from agenkit_trader.validation.report import write_report
 from agenkit_trader.validation.trials import TrialCounter
 
@@ -52,26 +52,21 @@ def main(argv: list[str] | None = None) -> None:
     gate_cfg = load_gate_config(ROOT / "config" / "gate.yaml")
     costs = load_costs(ROOT / "config" / "research.yaml")
     counter = TrialCounter(a.out.parent / "trials.json")
-    verdicts: list[Verdict] = []
+    candidates: list[Candidate] = []
     for sym in a.symbols:
         bars = load_klines(sym, a.interval, start, end, a.cache)
         funding = load_funding(sym, start, end, a.cache)
         aux = {"funding": align_asof(bars, funding, FUNDING_AVAILABLE_LAG)}
         print(f"{sym}: {len(bars)} bars {bars.index[0]} .. {bars.index[-1]}")
         for strat in REGISTRY.values():
-            v = evaluate(
-                strat,
-                bars,
-                aux,
-                costs,
-                gate_cfg,
-                counter,
-                symbol=sym,
-                interval=a.interval,
-                funding=funding,
+            candidates.append(
+                Candidate(strat, bars, aux, sym, a.interval, funding=funding)
             )
-            print(f"  {strat.name}: {'PASS' if v.passed else 'REJECT'}")
-            verdicts.append(v)
+    # every candidate's grid points are counted BEFORE any is evaluated, and
+    # all are tested against that final total (order-independent p-values)
+    verdicts = evaluate_candidates(candidates, costs, gate_cfg, counter)
+    for v in verdicts:
+        print(f"  {v.symbol} {v.name}: {'PASS' if v.passed else 'REJECT'}")
     write_report(verdicts, a.out)
     print(f"total trials counted: {counter.total}")
     print(pd.Series([v.passed for v in verdicts]).sum(), "of", len(verdicts), "passed")

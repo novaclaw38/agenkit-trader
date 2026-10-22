@@ -50,3 +50,15 @@ See `REPORT.md` for the exact numbers.
   new run, and that run's grid points must be added to `research/trials.json`.
 
 None of this is a claim of profitability.
+
+## Trial count used by the deflated Sharpe (added after the committed run)
+
+The committed run tested each candidate against the cumulative trial count
+reached so far (`n_trials` 9, 21, 30, 39, 51, 60 in `REPORT.json`), so
+candidate order changed the p-value bar. This did not change any verdict:
+every p-value was above 0.93, and the p-value only grows with `n_trials`, so
+testing all six against the final total of 60 would also reject them all.
+Future runs (`scripts/run_research.py` via `evaluate_candidates`) add the
+grid points of every strategy x symbol to `research/trials.json` before any
+candidate is evaluated, and test every candidate against that final total.
+The committed report was not regenerated.
