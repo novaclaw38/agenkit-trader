@@ -50,6 +50,8 @@ from agenkit_trader.backtest.engine import BacktestResult, run_backtest
 from agenkit_trader.backtest.stats import Stats, compute_stats
 from agenkit_trader.config import GateConfig
 from agenkit_trader.data.lookahead import LookaheadError, assert_no_lookahead
+from agenkit_trader.regime import REGIMES as REGIMES  # re-exported
+from agenkit_trader.regime import label_regimes as label_regimes  # re-exported
 from agenkit_trader.strategies.base import Strategy
 from agenkit_trader.validation.split import split_by_time
 from agenkit_trader.validation.sweep import (
@@ -61,7 +63,6 @@ from agenkit_trader.validation.sweep import (
 )
 from agenkit_trader.validation.trials import TrialCounter, deflated_sharpe_pvalue
 
-REGIMES = ("range", "trend")  # label 0.0, 1.0
 _SECONDS_PER_YEAR = 365.0 * 24 * 3600
 
 
@@ -90,16 +91,6 @@ class Verdict:
     n_trials: int
     sweep: SweepResult
     ruined: bool
-
-
-def label_regimes(bars: pd.DataFrame, window: int) -> pd.Series:
-    """1.0 = trend, 0.0 = range, NaN = warm-up; causal (see module docs)."""
-    c = bars["close"].astype("float64")
-    path = c.diff().abs().rolling(window).sum()
-    er = (c - c.shift(window)).abs() / path.where(path > 0)
-    med = er.expanding(min_periods=window).median()
-    lab = (er > med).astype("float64")
-    return lab.where(er.notna() & med.notna())
 
 
 def passes_cost_check(stats: Stats, *, ruined: bool) -> bool:

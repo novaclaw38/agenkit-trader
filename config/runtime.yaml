@@ -1,0 +1,18 @@
+# Paper/testnet runtime settings. No API keys here: keys are read ONLY from the
+# environment variables BINANCE_TESTNET_KEY / BINANCE_TESTNET_SECRET.
+#
+# stop_atr_mult and atr_window are PROPOSALS for the user to confirm: the
+# research strategies emit no stop price, so the runtime derives a protective
+# stop = entry -/+ stop_atr_mult * ATR(atr_window) (simple mean of true range),
+# sizes the position so the loss at that stop is <= max_risk_per_trade, and
+# places it on the exchange as a reduce-only STOP_MARKET (disaster stop).
+# Strategy bar-close exits remain the normal exit.
+stop_atr_mult: 3.0            # PROPOSED, user to confirm
+atr_window: 14                # PROPOSED, user to confirm (bars)
+bars_limit: 1000              # closed-bar history fetched per cycle (max 1500)
+poll_interval_s: 30           # seconds between cycles; must be well under stale_after_s
+recv_window_ms: 5000          # Binance recvWindow for signed requests
+# Restart reconciliation for a position / open order on a symbol that no
+# deployed strategy owns. false (default): refuse to start and tell the user.
+# true: trip the kill switch (flatten everything and halt).
+flatten_unowned_on_start: false

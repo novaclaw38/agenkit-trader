@@ -12,6 +12,17 @@ from typing import Protocol
 
 import pandas as pd
 
+# Largest tolerated |server time - local time| before the runtime halts.
+MAX_CLOCK_SKEW_MS = 1000
+
+
+class VenueError(RuntimeError):
+    """A venue call failed. Messages never contain credentials."""
+
+
+class ClockSkewError(VenueError):
+    """Local clock differs from the venue's by more than MAX_CLOCK_SKEW_MS."""
+
 
 @dataclass(frozen=True)
 class Position:
@@ -35,6 +46,22 @@ class Order:
     price_ref: float
     stop_price: float | None
     strategy: str
+    # Deterministic client order id (strategy/symbol/bar time/kind) so a
+    # resubmission of the same decision is recognisable; "" = venue assigns.
+    client_id: str = ""
+    # Exchange-enforced: the order may only reduce an existing position.
+    reduce_only: bool = False
+
+
+@dataclass(frozen=True)
+class OpenOrder:
+    symbol: str
+    side: str  # "buy" | "sell"
+    qty: float
+    kind: str  # exchange order type, e.g. "STOP_MARKET"
+    stop_price: float | None
+    client_id: str
+    reduce_only: bool
 
 
 @dataclass(frozen=True)
@@ -66,6 +93,27 @@ class Venue(Protocol):
 
     def symbol_rules(self, symbol: str) -> SymbolRules: ...
 
-    def place_order(self, order: Order) -> Fill: ...
+    def get_mark_price(self, symbol: str) -> float: ...
 
-    def flatten_all(self) -> None: ...
+    def get_funding(self, symbol: str, limit: int) -> pd.Series:
+        """Funding rates stamped at funding time (UTC index). Raises
+        NotImplementedError if the venue cannot supply them."""
+        ...
+
+    def get_open_orders(self) -> list[OpenOrder]: ...
+
+    def place_order(self, order: Order) -> Fill:
+        """Market order for exactly ``order.qty``."""
+        ...
+
+    def place_stop(self, order: Order) -> str:
+        """Exchange-side reduce-only STOP_MARKET at ``order.stop_price`` for
+        ``order.qty``; returns the venue's id for it."""
+        ...
+
+    def cancel_open_orders(self, symbol: str) -> None: ...
+
+    def flatten_all(self) -> None:
+        """Cancel every open order and close every position. Kill-switch
+        path: never routed through the RiskGate."""
+        ...

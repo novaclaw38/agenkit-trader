@@ -10,6 +10,9 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = ["pandas", "numpy", "httpx", "pyyaml"]
 
+[project.scripts]
+agenkit = "agenkit_trader.cli:main"
+
 [project.optional-dependencies]
 dev = ["pytest", "hypothesis", "ruff", "mypy", "types-PyYAML", "pandas-stubs"]
 

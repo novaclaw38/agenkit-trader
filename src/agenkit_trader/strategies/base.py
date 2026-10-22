@@ -21,6 +21,10 @@ class Strategy(Protocol):
     decided at the close of bar ``t`` and must use only information available
     at that close. NaN (e.g. indicator warm-up) is treated as flat (0).
     ``aux`` holds extra time series (funding, features) indexed like ``bars``.
+
+    Optional attribute ``aux_required: tuple[str, ...]`` names the ``aux``
+    series the strategy needs; the runtime refuses to start a deployed
+    strategy whose required aux the venue cannot supply.
     """
 
     name: str

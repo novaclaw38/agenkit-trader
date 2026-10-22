@@ -46,6 +46,8 @@ class FundingReversion:
         "max_hold": [24, 48, 72],
     }
     stop_pct = 0.05  # fixed, not optimised
+    # Aux series the runtime must supply (aligned with FUNDING_AVAILABLE_LAG).
+    aux_required = ("funding",)
 
     def warmup(self, params: dict[str, Any]) -> int:
         return 1

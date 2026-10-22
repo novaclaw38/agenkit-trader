@@ -147,3 +147,48 @@ def test_gate_rejects_bad_new_keys(field: str, bad: float) -> None:
 def test_gate_win_rate_bounds_inclusive() -> None:
     GateConfig(**{**_GATE_OK, "min_win_rate": 0.0})  # type: ignore[arg-type]
     GateConfig(**{**_GATE_OK, "min_win_rate": 1.0})  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------- runtime
+
+
+def test_runtime_yaml_values() -> None:
+    from agenkit_trader.config import load_runtime_config
+
+    r = load_runtime_config(Path(__file__).parents[1] / "config" / "runtime.yaml")
+    assert r.stop_atr_mult == 3.0
+    assert r.atr_window == 14
+    assert r.flatten_unowned_on_start is False
+
+
+@pytest.mark.parametrize(
+    ("field", "bad"),
+    [
+        ("stop_atr_mult", 0.0),
+        ("stop_atr_mult", -1.0),
+        ("stop_atr_mult", float("nan")),
+        ("stop_atr_mult", float("inf")),
+        ("atr_window", 0),
+        ("atr_window", 2.5),
+        ("bars_limit", 0),
+        ("bars_limit", 1501),
+        ("poll_interval_s", 0),
+        ("recv_window_ms", 0),
+        ("recv_window_ms", 60_001),
+        ("flatten_unowned_on_start", 1),
+    ],
+)
+def test_runtime_config_rejects(field: str, bad: object) -> None:
+    from agenkit_trader.config import RuntimeConfig
+
+    with pytest.raises(ValueError, match=field):
+        RuntimeConfig(**{field: bad})  # type: ignore[arg-type]
+
+
+def test_runtime_config_unknown_key(tmp_path: Path) -> None:
+    from agenkit_trader.config import load_runtime_config
+
+    p = tmp_path / "r.yaml"
+    p.write_text("stop_atr_mult: 2.0\napi_key: nope\n")
+    with pytest.raises(ValueError, match="unknown keys"):
+        load_runtime_config(p)

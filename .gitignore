@@ -9,3 +9,4 @@ __pycache__/
 logs/
 .env
 research/*.lock
+state/

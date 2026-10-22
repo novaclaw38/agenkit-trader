@@ -1,4 +1,4 @@
-"""Typed configuration for the risk gate and the validation gate."""
+"""Typed configuration for the risk gate, the validation gate and the runtime."""
 
 from __future__ import annotations
 
@@ -97,6 +97,47 @@ class GateConfig:
                 raise ValueError(f"{name} must be a positive int, got {v!r}")
 
 
+@dataclass(frozen=True)
+class RuntimeConfig:
+    """Paper/testnet runtime settings (``config/runtime.yaml``). No secrets:
+    API keys only ever come from environment variables."""
+
+    # Protective (disaster) stop: entry -/+ stop_atr_mult * ATR(atr_window),
+    # placed on the exchange as a reduce-only STOP_MARKET after every entry.
+    stop_atr_mult: float = 3.0
+    atr_window: int = 14
+    # Closed-bar history fetched per cycle (Binance klines max 1500 per call).
+    bars_limit: int = 1000
+    poll_interval_s: float = 30.0
+    recv_window_ms: int = 5000
+    # Restart reconciliation: a position or open order on a symbol that no
+    # deployed strategy owns. False: refuse to start and tell the user.
+    # True: trip the kill switch (flatten everything, halt).
+    flatten_unowned_on_start: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.flatten_unowned_on_start, bool):
+            raise ValueError("flatten_unowned_on_start must be true or false")
+        for name in ("stop_atr_mult", "poll_interval_s"):
+            v = getattr(self, name)
+            if isinstance(v, bool) or not isinstance(v, int | float):
+                raise ValueError(f"{name} must be a number, got {v!r}")
+            if not math.isfinite(v) or v <= 0:
+                raise ValueError(f"{name} must be finite and > 0, got {v!r}")
+        for name, hi in (
+            ("atr_window", None),
+            ("bars_limit", 1500),
+            ("recv_window_ms", 60_000),
+        ):
+            v = getattr(self, name)
+            if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
+                raise ValueError(f"{name} must be a positive int, got {v!r}")
+            if hi is not None and v > hi:
+                raise ValueError(f"{name} must be <= {hi}, got {v!r}")
+        if self.bars_limit <= self.atr_window + 1:
+            raise ValueError("bars_limit must exceed atr_window + 1")
+
+
 def _load_mapping(path: Path) -> dict[str, Any]:
     data = yaml.safe_load(Path(path).read_text())
     if data is None:
@@ -123,3 +164,9 @@ def load_gate_config(path: Path) -> GateConfig:
     data = _load_mapping(path)
     _check_keys(GateConfig, data, path)
     return GateConfig(**data)
+
+
+def load_runtime_config(path: Path) -> RuntimeConfig:
+    data = _load_mapping(path)
+    _check_keys(RuntimeConfig, data, path)
+    return RuntimeConfig(**data)
