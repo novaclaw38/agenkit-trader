@@ -19,7 +19,7 @@ LOOPBACK = "127.0.0.1"
 DEFAULT_PORT = 8765
 _CSP = (
     "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
-    "connect-src 'self'; base-uri 'none'; form-action 'none'"
+    "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 )
 
 Route = Callable[[UiPaths], dict[str, Any]]
@@ -52,12 +52,24 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Security-Policy", _CSP)
+        self.send_header("Referrer-Policy", "no-referrer")
         for k, v in extra.items():
             self.send_header(k.replace("_", "-"), v)
         self.end_headers()
         self.wfile.write(body)
 
+    def _host_ok(self) -> bool:
+        """Only 127.0.0.1 or 127.0.0.1:<bound port> (blocks DNS rebinding)."""
+        host = self.headers.get("Host")
+        port = self.server.server_address[1]
+        return host in (LOOPBACK, f"{LOOPBACK}:{port}")
+
+    def _misdirected(self) -> None:
+        self._send(421, "text/plain; charset=utf-8", b"misdirected request\n")
+
     def do_GET(self) -> None:  # noqa: N802
+        if not self._host_ok():
+            return self._misdirected()
         path = self.path.split("?", 1)[0].split("#", 1)[0]
         if path == "/":
             self._send(200, "text/html; charset=utf-8", PAGE.encode("utf-8"))
@@ -66,12 +78,16 @@ class Handler(BaseHTTPRequestHandler):
                 data = API[path](self.server.paths)
             except Exception:  # noqa: BLE001 - never leak a trace or a path
                 data = {"error": "this view could not be built"}
-            body = json.dumps(data, allow_nan=False, default=str).encode("utf-8")
+            body = json.dumps(readers.clean(data), allow_nan=False, default=str).encode(
+                "utf-8"
+            )
             self._send(200, "application/json; charset=utf-8", body)
         else:
             self._send(404, "text/plain; charset=utf-8", b"not found\n")
 
     def _method_not_allowed(self) -> None:
+        if not self._host_ok():
+            return self._misdirected()
         self._send(
             405, "text/plain; charset=utf-8", b"read-only: GET only\n", Allow="GET"
         )

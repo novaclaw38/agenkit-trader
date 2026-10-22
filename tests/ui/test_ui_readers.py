@@ -2,6 +2,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from ui_helpers import fill, make_paths, rec, stop, write_log
 
 from agenkit_trader.ui import readers
@@ -285,3 +286,64 @@ def test_failure_missing(tmp_path: Path) -> None:
     assert f["text"] == "" and f["error"]
     p.spec.unlink()
     assert readers.read_failure(p)["error"]
+
+
+def _big_log(p: Path, n: int = 400) -> None:
+    write_log(
+        p.log,
+        [
+            fill(f"2026-10-{1 + i // 24:02d}T{i % 24:02d}:00:00+00:00", "buy", 0.1)
+            for i in range(n)
+        ],
+    )
+
+
+def test_log_under_cap_not_truncated(tmp_path: Path) -> None:
+    p = make_paths(tmp_path)
+    _big_log(p, 5)
+    assert readers.read_decisions(p)["log_truncated"] is False
+    assert readers.read_status(p, now=NOW)["log_truncated"] is False
+
+
+def test_large_log_reads_tail_only_and_is_honest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    p = make_paths(tmp_path)
+    _big_log(p)
+    monkeypatch.setattr(readers, "MAX_LOG_BYTES", 8192)
+    d = readers.read_decisions(p)
+    assert d["log_truncated"] is True
+    assert 0 < len(d["rows"]) < 400
+    assert d["skipped"] == 0  # partial first line dropped, not counted
+    assert d["rows"][-1]["ts"].startswith("2026-10-17T15")
+    s = readers.read_status(p, now=NOW)
+    assert s["log_truncated"] is True
+    assert s["no_trades"] is False
+    assert s["positions"] == [] and "log too large" in s["positions_note"]
+    g = s["live_gate"]
+    assert g["paper_days"] is None and g["paper_trades"] is None
+    assert "log too large" in g["paper_note"]
+    assert s["mode"].startswith("unknown")
+    assert s["last_decision_ts"].startswith("2026-10-17T15")
+
+
+def test_nan_cleaning() -> None:
+    out = readers.clean({"a": float("nan"), "b": [float("inf"), 1.5], "c": "x"})
+    assert out == {"a": None, "b": [None, 1.5], "c": "x"}
+
+
+def test_live_gate_thresholds_met_wording(tmp_path: Path) -> None:
+    p = make_paths(tmp_path)
+    (p.config_dir / "live.yaml").write_text(
+        "enabled: true\nmin_paper_days: 1\nmin_paper_trades: 2\n"
+    )
+    write_log(
+        p.log,
+        [
+            fill("2026-10-20T08:00:00+00:00", "buy", 0.5),
+            fill("2026-10-22T08:00:00+00:00", "sell", 0.5),
+        ],
+    )
+    g = readers.read_status(p, now=NOW)["live_gate"]
+    assert g["state"] == "thresholds met"
+    assert "not implemented in this build" in g["note"]

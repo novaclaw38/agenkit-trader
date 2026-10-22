@@ -50,29 +50,29 @@ function chart(eq){
   '<div class="mut">min '+esc(fx(lo))+", max "+esc(fx(Math.max.apply(null,eq.map(function(e){return e.equity;}))))+", "+n+" points</div>"+
   "<h2>Drawdown from peak</h2>"+
   '<svg viewBox="0 0 '+W+" "+H+'" role="img" aria-label="drawdown"><polyline fill="none" stroke="currentColor" stroke-width="2" points="'+dd+'"/></svg>'+
-  '<div class="mut">worst '+esc(pct(Math.max.apply(null,eq.map(function(e){return e.drawdown;}))))+" (top of chart = worst)</div>";
+  '<div class="mut">worst '+esc(pct(Math.max.apply(null,eq.map(function(e){return e.drawdown;}))))+" (bottom of chart = worst)</div>";
 }
 function viewStatus(s){
   var h="<h2>Mode</h2><p><b>"+esc(s.mode)+"</b>";
   if(s.halt_reason){h+='<br><span class="bad">halted: '+esc(s.halt_reason)+"</span>";}
-  h+="</p>"+note(s.log_message)+note(s.state_error);
+  h+="</p>"+note(s.log_notice)+note(s.log_message)+note(s.state_error);
   if(s.log_lines_skipped){h+=note(s.log_lines_skipped+" unreadable log line(s) skipped");}
   h+="<h2>Last decision</h2><p>"+(s.last_decision_ts?esc(s.last_decision_ts):"none recorded")+"</p>";
   if(s.stale===true){h+='<p class="warn">stale: no log record for over '+esc(s.stale_after_hours)+" hours; the runtime may not be running.</p>";}
   h+="<h2>Open positions and stops</h2>";
-  if(!s.positions.length){h+="<p>none in the decision log"+(s.no_trades?" (no paper trades yet)":"")+"</p>";}
+  if(!s.positions.length){h+="<p>"+(s.positions_note?esc(s.positions_note):"none in the decision log")+(s.no_trades?" (no paper trades yet)":"")+"</p>";}
   else{h+=table(["symbol","net qty","stop price","source"],s.positions.map(function(p){return [p.symbol,p.net_qty,p.stop_price===null?"no stop logged":p.stop_price,p.source];}));}
   if(s.state){h+="<h2>State file</h2>"+table(["field","value"],[["baseline equity",s.state.baseline_equity],["peak equity",s.state.peak_equity],["day",s.state.day],["day start equity",s.state.day_start_equity],["halted",s.state.halted||"no"]].map(function(r){return [r[0],r[1]===null||r[1]===undefined?"not recorded":r[1]];}));
     var lb=Object.keys(s.state.last_bar||{});if(lb.length){h+=table(["deployment","last bar"],lb.map(function(k){return [k,s.state.last_bar[k]];}));}}
   var g=s.live_gate;
-  h+='<h2>Live gate</h2><p class="'+(g.state==="locked"?"ok":"warn")+'">'+esc(g.state)+"</p>"+note(g.error)+"<p>enabled in config: "+esc(g.enabled)+"<br>paper days: "+esc(g.paper_days===null?"unknown":fx(g.paper_days))+" of "+esc(g.min_paper_days===null?"unknown":g.min_paper_days)+" needed<br>paper filled orders: "+esc(g.paper_trades===null?"unknown":g.paper_trades)+" of "+esc(g.min_paper_trades===null?"unknown":g.min_paper_trades)+' needed</p><p class="mut">'+esc(g.note)+"</p>";
+  h+='<h2>Live gate</h2><p class="mut">"locked" or "thresholds met". Live order placement is not implemented in this build.</p><p><b>'+esc(g.state)+"</b></p>"+note(g.error)+"<p>enabled in config: "+esc(g.enabled)+"<br>paper days: "+esc(g.paper_days===null?(g.paper_note||"unknown"):fx(g.paper_days))+" of "+esc(g.min_paper_days===null?"unknown":g.min_paper_days)+" needed<br>paper filled orders: "+esc(g.paper_trades===null?(g.paper_note||"unknown"):g.paper_trades)+" of "+esc(g.min_paper_trades===null?"unknown":g.min_paper_trades)+' needed</p><p class="mut">'+esc(g.note)+"</p>";
   if(s.no_trades){h+="<h2>Performance</h2><p>no paper trades yet</p>";}
   else if(s.equity.length>=2){h+=chart(s.equity);}
   else{h+="<h2>Equity</h2><p>fewer than 2 data points; no chart.</p>";}
   return h;
 }
 function viewDecisions(d){
-  var h=note(d.message);
+  var h=note(d.log_notice)+note(d.message);
   if(d.skipped){h+=note(d.skipped+" unreadable log line(s) skipped");}
   if(!d.rows.length){return h+"<p>no decisions logged</p>";}
   var kinds={};d.rows.forEach(function(r){kinds[r.kind]=1;});

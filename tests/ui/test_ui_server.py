@@ -176,3 +176,88 @@ def test_server_is_not_threaded() -> None:
     from socketserver import ThreadingMixIn
 
     assert not issubclass(server.UiServer, ThreadingMixIn)
+
+
+def raw_req(
+    port: int, method: str, path: str, host: str | None
+) -> tuple[int, dict[str, str], bytes]:
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        c.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+        if host is not None:
+            c.putheader("Host", host)
+        c.putheader("Content-Length", "0")
+        c.endheaders()
+        r = c.getresponse()
+        return r.status, {k.lower(): v for k, v in r.getheaders()}, r.read()
+    finally:
+        c.close()
+
+
+@pytest.mark.parametrize("method", ["GET", "POST", "DELETE"])
+@pytest.mark.parametrize("path", ["/", "/api/status", "/api/decisions", "/nope"])
+@pytest.mark.parametrize(
+    "host",
+    [
+        "evil.com",
+        "127.0.0.1.evil",
+        "127.0.0.1.evil:{port}",
+        None,
+        "127.0.0.1:1",
+        "localhost:{port}",
+        "127.0.0.1:",
+        "[::1]:{port}",
+    ],
+)
+def test_bad_host_header_421_no_data(
+    running: tuple[HTTPServer, int],
+    paths: UiPaths,
+    method: str,
+    path: str,
+    host: str | None,
+) -> None:
+    _, port = running
+    write_log(paths.log, [fill("2026-10-22T08:00:00+00:00", "buy", 0.1)])
+    h = host.format(port=port) if host else host
+    status, _, body = raw_req(port, method, path, h)
+    assert status == 421
+    assert b"ETHUSDT" not in body and b"{" not in body and b"<html" not in body
+
+
+def test_good_host_headers_accepted(running: tuple[HTTPServer, int]) -> None:
+    _, port = running
+    assert raw_req(port, "GET", "/api/risk", "127.0.0.1")[0] == 200
+    assert raw_req(port, "GET", "/api/risk", f"127.0.0.1:{port}")[0] == 200
+    assert raw_req(port, "POST", "/api/risk", f"127.0.0.1:{port}")[0] == 405
+
+
+def test_security_headers(running: tuple[HTTPServer, int]) -> None:
+    _, port = running
+    _, h, _ = req(port, "GET", "/")
+    assert h["referrer-policy"] == "no-referrer"
+    assert "frame-ancestors 'none'" in h["content-security-policy"]
+
+
+def test_page_labels() -> None:
+    from agenkit_trader.ui.page import PAGE
+
+    assert "bottom of chart = worst" in PAGE
+    assert "top of chart = worst" not in PAGE
+    assert "thresholds met" in PAGE and "not implemented in this build" in PAGE
+
+
+def test_nan_in_report_does_not_break_tab(
+    running: tuple[HTTPServer, int], paths: UiPaths
+) -> None:
+    (paths.research_dir / "REPORT.json").write_text(
+        '[{"name": "a", "symbol": "BTCUSDT", "interval": "1h", "passed": false,'
+        ' "n_trials": 3, "pvalue": NaN, "holdout": {"sharpe": NaN,'
+        ' "n_trades": 4, "total_return": Infinity}}]'
+    )
+    _, port = running
+    status, _, body = req(port, "GET", "/api/research")
+    d = json.loads(body)
+    assert status == 200 and "error" not in d
+    c = d["candidates"][0]
+    assert c["holdout"]["sharpe"] is None and c["holdout"]["n_trades"] == 4
+    assert c["holdout"]["total_return"] is None and c["pvalue"] is None

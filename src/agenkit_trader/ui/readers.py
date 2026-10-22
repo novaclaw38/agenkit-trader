@@ -24,6 +24,9 @@ from agenkit_trader.config import (
 
 REPO = Path(__file__).resolve().parents[3]
 DECISION_LIMIT = 1000
+MAX_LOG_BYTES = 8 * 1024 * 1024  # read only the tail of a larger log
+_UNKNOWN_LOG = "unknown (log too large to read fully)"
+_TRUNC_NOTICE = "log truncated, showing recent records"
 STALE_AFTER = timedelta(hours=2)  # 1h bars plus margin
 _FILLED = ("filled", "filled_after_error")
 _HALT_KINDS = ("kill_switch", "halt")
@@ -90,6 +93,17 @@ def _num(v: Any) -> float | None:
     return float(v) if math.isfinite(v) else None
 
 
+def clean(v: Any) -> Any:
+    """Replace NaN/Infinity (anywhere in a JSON-able value) with None."""
+    if isinstance(v, float):
+        return v if math.isfinite(v) else None
+    if isinstance(v, dict):
+        return {k: clean(x) for k, x in v.items()}
+    if isinstance(v, list | tuple):
+        return [clean(x) for x in v]
+    return v
+
+
 def _d(v: Any) -> dict[str, Any]:
     return v if isinstance(v, dict) else {}
 
@@ -115,15 +129,30 @@ def _load_json(path: Path, what: str) -> tuple[Any, str | None]:
         return None, f"{what} is not valid JSON"
 
 
-def _load_records(path: Path) -> tuple[list[dict[str, Any]], int, str | None]:
-    """(records, skipped line count, error message). Tolerant: bad lines are
-    skipped and counted."""
+def _load_records(
+    path: Path,
+) -> tuple[list[dict[str, Any]], int, str | None, bool]:
+    """(records, skipped line count, error message, log_truncated). Tolerant:
+    bad lines are skipped and counted. A log over MAX_LOG_BYTES is read from
+    its tail only (the partial first line is dropped, not counted)."""
+    truncated = False
     try:
-        text = path.read_text(encoding="utf-8")
+        with path.open("rb") as f:
+            size = f.seek(0, 2)
+            if size > MAX_LOG_BYTES:
+                truncated = True
+                f.seek(size - MAX_LOG_BYTES)
+                raw = f.read()
+                nl = raw.find(b"\n")
+                raw = raw[nl + 1 :] if nl >= 0 else b""
+            else:
+                f.seek(0)
+                raw = f.read()
+        text = raw.decode("utf-8")
     except FileNotFoundError:
-        return [], 0, "no decision log yet"
+        return [], 0, "no decision log yet", False
     except (OSError, UnicodeDecodeError):
-        return [], 0, "the decision log could not be read"
+        return [], 0, "the decision log could not be read", False
     recs: list[dict[str, Any]] = []
     skipped = 0
     for line in text.splitlines():
@@ -138,7 +167,7 @@ def _load_records(path: Path) -> tuple[list[dict[str, Any]], int, str | None]:
             recs.append(r)
         else:
             skipped += 1
-    return recs, skipped, None
+    return recs, skipped, None, truncated
 
 
 def _symbol(r: dict[str, Any]) -> str:
@@ -179,13 +208,15 @@ def _row(r: dict[str, Any]) -> dict[str, str]:
 
 
 def read_decisions(paths: UiPaths, limit: int = DECISION_LIMIT) -> dict[str, Any]:
-    recs, skipped, err = _load_records(paths.log)
+    recs, skipped, err, log_truncated = _load_records(paths.log)
     keep = recs[-limit:] if limit > 0 else []
     return {
         "rows": [_row(r) for r in keep],
         "total": len(recs),
         "skipped": skipped,
         "truncated": len(recs) > len(keep),
+        "log_truncated": log_truncated,
+        "log_notice": _TRUNC_NOTICE if log_truncated else None,
         "message": err,
         "funding_note": "funding is not recorded in the decision log",
     }
@@ -256,9 +287,10 @@ def _live_gate(paths: UiPaths, stats: PaperRecord | None) -> dict[str, Any]:
         "min_paper_trades": None,
         "paper_days": stats.days if stats else None,
         "paper_trades": stats.trades if stats else None,
+        "paper_note": None if stats else _UNKNOWN_LOG,
         "error": None,
-        "note": "the final unlock is only possible via the interactive "
-        "`agenkit live`; this page cannot unlock anything",
+        "note": "live order placement is not implemented in this build; the "
+        "final unlock is only possible via the interactive `agenkit live`",
     }
     try:
         cfg = load_live_config(paths.config_dir / _cfg("live"))
@@ -279,17 +311,18 @@ def _live_gate(paths: UiPaths, stats: PaperRecord | None) -> dict[str, Any]:
         and stats.days >= cfg.min_paper_days
         and stats.trades >= cfg.min_paper_trades
     ):
-        gate["state"] = "unlocked"
+        gate["state"] = "thresholds met"
         gate["note"] = (
-            "enabled and paper thresholds met; the log's risk-config check, the "
-            "typed phrase and the keys are still checked by `agenkit live`"
+            "live order placement is not implemented in this build. Enabled and "
+            "paper thresholds met; the risk-config check, the typed phrase and "
+            "the keys are still checked by `agenkit live`"
         )
     return gate
 
 
 def read_status(paths: UiPaths, now: datetime | None = None) -> dict[str, Any]:
     now = now or datetime.now(UTC)
-    recs, skipped, log_err = _load_records(paths.log)
+    recs, skipped, log_err, log_truncated = _load_records(paths.log)
     state: dict[str, Any] | None = None
     state_err: str | None = None
     raw, state_err = _load_json(paths.state, "state file")
@@ -318,12 +351,14 @@ def read_status(paths: UiPaths, now: datetime | None = None) -> dict[str, Any]:
         mode = "halted"
     elif any(r.get("kind") == "runtime" and r.get("result") == "started" for r in recs):
         mode = "paper"
+    elif log_truncated:
+        mode = "unknown (log too large to read fully)"
     else:
         mode = "research-only"
     times = [t for t in (_parse_ts(r.get("ts")) for r in recs) if t is not None]
     last = max(times) if times else None
     stale = None if last is None else (now - last) > STALE_AFTER
-    stats = _paper_record(recs) if log_err is None else None
+    stats = _paper_record(recs) if log_err is None and not log_truncated else None
     equity = _equity(recs)
     fills = sum(
         1 for r in recs if r.get("kind") == "order" and r.get("result") in _FILLED
@@ -338,10 +373,14 @@ def read_status(paths: UiPaths, now: datetime | None = None) -> dict[str, Any]:
         "state_error": state_err,
         "log_message": log_err,
         "log_lines_skipped": skipped,
-        "positions": _positions(recs),
+        "log_truncated": log_truncated,
+        "log_notice": _TRUNC_NOTICE if log_truncated else None,
+        "positions": [] if log_truncated else _positions(recs),
+        "positions_note": _UNKNOWN_LOG if log_truncated else None,
         "equity": equity,
-        "equity_note": "equity as logged with each order; drawdown from its peak",
-        "no_trades": fills == 0,
+        "equity_note": "equity as logged with each order; drawdown from its peak"
+        + (" (recent records only)" if log_truncated else ""),
+        "no_trades": fills == 0 and not log_truncated,
         "live_gate": _live_gate(paths, stats),
     }
 
@@ -353,9 +392,9 @@ def _holdout_row(c: dict[str, Any]) -> dict[str, Any]:
         "interval": _text(c.get("interval", "")),
         "passed": c.get("passed") is True,
         "policy": _text(c.get("policy", "research")),
-        "n_trials": c.get("n_trials"),
+        "n_trials": clean(c.get("n_trials")),
         "pvalue": _num(c.get("pvalue")),
-        "holdout": _d(c.get("holdout")),
+        "holdout": clean(_d(c.get("holdout"))),
         "reasons": [_text(x) for x in c.get("reasons", []) if isinstance(x, str)]
         if isinstance(c.get("reasons"), list)
         else [],
