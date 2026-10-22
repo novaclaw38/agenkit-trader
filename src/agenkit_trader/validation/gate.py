@@ -37,7 +37,10 @@ Policy. ``policy`` selects what is simulated (``validation/sweep.py``):
 runtime trades). The sweep, the train re-run, the hold-out, the cost
 re-run and the regime split all use the same policy. Under ``"runtime"`` the
 hold-out simulation gets the train bars as ATR warm-up history (only bars
-before each decision are used).
+before each decision are used) and the sign of the signal on the last train
+bar as ``prev_signal`` (a signal already on across the split is not an
+entry). A hold-out (or cost re-run) that trips the runtime's daily-loss /
+drawdown kill switch is rejected.
 
 Win rate is gated by ``min_win_rate``, a sanity floor (Sharpe and profit
 factor are the binding checks).
@@ -102,12 +105,22 @@ class Verdict:
     sweep: SweepResult
     ruined: bool
     policy: str = "research"
+    # runtime policy: the hold-out would have tripped the kill switch
+    halted: bool = False
+    halt_reason: str | None = None
 
 
-def passes_cost_check(stats: Stats, *, ruined: bool) -> bool:
-    """Still acceptable at inflated costs: positive return and PF > 1."""
+def passes_cost_check(stats: Stats, *, ruined: bool, halted: bool = False) -> bool:
+    """Still acceptable at inflated costs: positive return and PF > 1 (and,
+    under the runtime policy, no kill-switch halt)."""
     pf = stats.profit_factor
-    return (not ruined) and stats.total_return > 0 and not math.isnan(pf) and pf > 1.0
+    return (
+        (not ruined)
+        and (not halted)
+        and stats.total_return > 0
+        and not math.isnan(pf)
+        and pf > 1.0
+    )
 
 
 def allowed_regimes(
@@ -134,13 +147,26 @@ def allowed_regimes(
     return allowed, notes
 
 
-def holdout_reasons(stats: Stats, cfg: GateConfig, *, ruined: bool) -> list[str]:
+def holdout_reasons(
+    stats: Stats,
+    cfg: GateConfig,
+    *,
+    ruined: bool,
+    halted: bool = False,
+    halt_reason: str | None = None,
+) -> list[str]:
     """Rejection reasons from the hold-out statistics alone (NaN-safe:
-    every comparison is written so that NaN fails)."""
+    every comparison is written so that NaN fails). ``halted`` (runtime
+    policy): the hold-out tripped the runtime's kill switch."""
     st = stats
     out: list[str] = []
     if ruined:
         out.append("hold-out backtest ruined (equity hit zero)")
+    if halted:
+        out.append(
+            "hold-out would have halted the runtime (kill switch: "
+            f"{halt_reason or 'limit'})"
+        )
     if st.n_trades == 0:
         out.append("hold-out has zero trades")
     elif st.n_trades < cfg.min_trades:
@@ -280,9 +306,13 @@ def evaluate(
         reasons.append(f"lookahead detected: {e}")
 
     # --- the single hold-out evaluation ---
-    pos = sig(full).loc[hold.index]
-    # runtime policy: the train bars are ATR history for the hold-out
+    full_pos = sig(full)
+    pos = full_pos.loc[hold.index]
+    # runtime policy: the train bars are ATR history for the hold-out, and
+    # the signal on the last train bar decides whether hold-out bar 0 is a
+    # transition (the runtime never enters mid-signal)
     warm = train if policy == "runtime" else None
+    prev = float(np.sign(full_pos.loc[train.index[-1]]))
     c2_costs = costs.scaled(gate_cfg.cost_multiplier)
     ho, c2 = (
         simulate(
@@ -294,6 +324,7 @@ def evaluate(
             policy=policy,
             runtime_policy=runtime_policy,
             warmup=warm,
+            prev_signal=prev,
         )
         for c in (costs, c2_costs)
     )
@@ -308,14 +339,17 @@ def evaluate(
     except ValueError:
         pvalue = 1.0
 
-    reasons += holdout_reasons(st, gate_cfg, ruined=ho.ruined)
+    reasons += holdout_reasons(
+        st, gate_cfg, ruined=ho.ruined, halted=ho.halted, halt_reason=ho.halt_reason
+    )
     if not sweep.stable:
         reasons.append(f"parameter sweep unstable: {sweep.reason}")
-    if not passes_cost_check(c2.stats, ruined=c2.ruined):
+    if not passes_cost_check(c2.stats, ruined=c2.ruined, halted=c2.halted):
         reasons.append(
             f"cost sensitivity: at {gate_cfg.cost_multiplier}x costs net return "
             f"{c2.stats.total_return:.4f}, profit factor {_fmt(c2.stats.profit_factor)}"
-            f"{', ruined' if c2.ruined else ''} (need return > 0 and PF > 1)"
+            f"{', ruined' if c2.ruined else ''}"
+            f"{', halted' if c2.halted else ''} (need return > 0 and PF > 1)"
         )
     if not pvalue <= gate_cfg.max_trial_adjusted_pvalue:
         reasons.append(
@@ -359,6 +393,8 @@ def evaluate(
         sweep=sweep,
         ruined=ho.ruined,
         policy=policy,
+        halted=ho.halted,
+        halt_reason=ho.halt_reason,
     )
 
 
@@ -372,6 +408,9 @@ class Candidate:
     symbol: str = ""
     interval: str = ""
     funding: pd.Series | None = None
+    # runtime policy for this candidate (e.g. its symbol's lot/tick rules);
+    # overrides the one given to evaluate_candidates
+    runtime_policy: RuntimePolicy | None = None
 
 
 def evaluate_candidates(
@@ -409,7 +448,7 @@ def evaluate_candidates(
             equity0=equity0,
             n_trials=n_trials,
             policy=policy,
-            runtime_policy=runtime_policy,
+            runtime_policy=c.runtime_policy or runtime_policy,
         )
         for c in candidates
     ]

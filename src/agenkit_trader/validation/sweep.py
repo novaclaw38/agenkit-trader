@@ -86,9 +86,12 @@ def simulate(
     policy: str = "research",
     runtime_policy: RuntimePolicy | None = None,
     warmup: pd.DataFrame | None = None,
+    prev_signal: float = 0.0,
 ) -> BacktestResult:
     """Backtest ``positions`` under ``policy`` (see the module docstring).
-    ``warmup`` (runtime policy only) is earlier history for the ATR."""
+    Runtime policy only: ``warmup`` is earlier history for the ATR and
+    ``prev_signal`` the signal on the bar before ``bars`` (so a signal that
+    was already on is not a fresh transition at the segment start)."""
     check_policy(policy)
     if policy == "research":
         return run_backtest(bars, positions, costs, funding, equity0)
@@ -103,6 +106,7 @@ def simulate(
         rp.runtime,
         rp.rules,
         warmup=warmup,
+        prev_signal=prev_signal,
     )
 
 
@@ -117,6 +121,8 @@ def backtest_params(
     *,
     policy: str = "research",
     runtime_policy: RuntimePolicy | None = None,
+    warmup: pd.DataFrame | None = None,
+    prev_signal: float = 0.0,
 ) -> BacktestResult:
     """Signal on exactly ``bars`` (aux restricted to its index) and backtest."""
     sub_aux = {k: v.reindex(bars.index) for k, v in aux.items()}
@@ -131,6 +137,8 @@ def backtest_params(
         equity0,
         policy=policy,
         runtime_policy=runtime_policy,
+        warmup=warmup,
+        prev_signal=prev_signal,
     )
 
 
@@ -164,6 +172,8 @@ def neighbourhood_sweep(
     equity0: float = 1000.0,
     policy: str = "research",
     runtime_policy: RuntimePolicy | None = None,
+    warmup: pd.DataFrame | None = None,
+    prev_signal: float = 0.0,
 ) -> SweepResult:
     """Backtest every grid point on ``bars`` and judge the best's neighbourhood."""
     if not 0 < tolerance <= 1:
@@ -183,6 +193,8 @@ def neighbourhood_sweep(
             equity0,
             policy=policy,
             runtime_policy=runtime_policy,
+            warmup=warmup,
+            prev_signal=prev_signal,
         )
         rows.append(
             {

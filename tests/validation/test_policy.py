@@ -7,7 +7,9 @@ import hashlib
 import json
 import runpy
 from pathlib import Path
+from typing import Any
 
+import numpy as np
 import pandas as pd
 import pytest
 from vsynth import FeatureStrategy, SpikeStrategy, costs, gate_cfg, market
@@ -77,67 +79,165 @@ def _ranged(bars: pd.DataFrame) -> pd.DataFrame:
     return b
 
 
-def test_runtime_policy_routes_every_backtest_through_the_simulator(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+@pytest.fixture(scope="module")
+def ranged_market() -> tuple[pd.DataFrame, dict[str, pd.Series]]:
     bars, aux = market(1)
-    bars = _ranged(bars)
-    calls: list[str] = []
+    return _ranged(bars), aux
+
+
+@pytest.fixture(scope="module")
+def research_verdict(
+    tmp_path_factory: pytest.TempPathFactory,
+    ranged_market: tuple[pd.DataFrame, dict[str, pd.Series]],
+) -> vgate.Verdict:
+    bars, aux = ranged_market
+    counter = TrialCounter(tmp_path_factory.mktemp("r") / "t.json")
+    return evaluate(FeatureStrategy(), bars, aux, costs(), gate_cfg(), counter)
+
+
+@pytest.fixture(scope="module")
+def runtime_run(
+    tmp_path_factory: pytest.TempPathFactory,
+    ranged_market: tuple[pd.DataFrame, dict[str, pd.Series]],
+) -> tuple[vgate.Verdict, list[dict[str, Any]]]:
+    """One runtime-policy evaluation, with every simulator call recorded and
+    the research engine forbidden."""
+    bars, aux = ranged_market
+    calls: list[dict[str, Any]] = []
     real_rt = vsweep.run_backtest_runtime
 
     def spy_rt(*a, **k):  # type: ignore[no-untyped-def]
-        calls.append("runtime")
+        calls.append({"bars": a[0], "costs": a[2], **k})
         return real_rt(*a, **k)
 
     def no_research(*a, **k):  # type: ignore[no-untyped-def]
         raise AssertionError("research engine used under policy='runtime'")
 
-    monkeypatch.setattr(vsweep, "run_backtest_runtime", spy_rt)
-    monkeypatch.setattr(vsweep, "run_backtest", no_research)
-    s = FeatureStrategy()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(vsweep, "run_backtest_runtime", spy_rt)
+        mp.setattr(vsweep, "run_backtest", no_research)
+        counter = TrialCounter(tmp_path_factory.mktemp("t") / "t.json")
+        v = evaluate(
+            FeatureStrategy(),
+            bars,
+            aux,
+            costs(),
+            gate_cfg(),
+            counter,
+            policy="runtime",
+        )
+    return v, calls
+
+
+def test_runtime_policy_routes_every_backtest_through_the_simulator(
+    runtime_run: tuple[vgate.Verdict, list[dict[str, Any]]],
+    ranged_market: tuple[pd.DataFrame, dict[str, pd.Series]],
+) -> None:
+    v, calls = runtime_run
+    n_grid = len(FeatureStrategy().param_grid["thr"])
+    # sweep (grid) + train re-run + hold-out + cost-sensitivity re-run
+    assert len(calls) == n_grid + 2 + 1
+    assert v.policy == "runtime"
+    assert v.holdout.n_trades > 0
+    assert set(v.regimes) == set(vgate.REGIMES)
+    assert v.cost_2x.total_return < v.holdout.total_return
+    # the hold-out runs get the train bars as warm-up and the signal of the
+    # last train bar as prev_signal
+    bars, aux = ranged_market
+    hold = [c for c in calls if c.get("warmup") is not None]
+    assert len(hold) == 2
+    train_end = hold[0]["warmup"].index[-1]
+    full_sig = FeatureStrategy().signal(bars, v.params, aux)
+    assert hold[0]["prev_signal"] == float(np.sign(full_sig.loc[train_end]))
+
+
+def test_runtime_policy_differs_from_research(
+    research_verdict: vgate.Verdict,
+    runtime_run: tuple[vgate.Verdict, list[dict[str, Any]]],
+) -> None:
+    assert research_verdict.holdout != runtime_run[0].holdout
+
+
+class AlwaysLong:
+    name = "always_long"
+    edge = "test"
+    param_grid: dict[str, list[Any]] = {"k": [1, 2]}
+
+    def signal(
+        self, bars: pd.DataFrame, params: dict[str, Any], aux: dict[str, pd.Series]
+    ) -> pd.Series:
+        return pd.Series(1.0, index=bars.index)
+
+
+def test_signal_on_across_the_split_is_not_a_holdout_entry(tmp_path: Path) -> None:
+    bars, aux = market(1, n=600)
     v = evaluate(
-        s,
-        bars,
+        AlwaysLong(),  # type: ignore[arg-type]
+        _ranged(bars),
         aux,
         costs(),
         gate_cfg(),
         TrialCounter(tmp_path / "t"),
         policy="runtime",
     )
-    n_grid = len(s.param_grid["thr"])
-    # sweep (grid) + train re-run + hold-out + cost-sensitivity re-run
-    assert len(calls) == n_grid + 3
-    assert v.policy == "runtime"
-    assert v.holdout.n_trades > 0
-    assert set(v.regimes) == set(vgate.REGIMES)
-    assert v.cost_2x.total_return < v.holdout.total_return
+    assert v.holdout.n_trades == 0  # the runtime would not enter mid-signal
 
 
-def test_runtime_policy_differs_from_research(tmp_path: Path) -> None:
-    bars, aux = market(1)
+def test_sweep_segment_honours_prev_signal_and_warmup() -> None:
+    bars, aux = market(1, n=600)
     bars = _ranged(bars)
-    kw = dict(costs=costs(), gate_cfg=gate_cfg())
-    a = evaluate(
-        FeatureStrategy(), bars, aux, counter=TrialCounter(tmp_path / "a"), **kw
-    )  # type: ignore[arg-type]
-    b = evaluate(
+    warm, seg = bars.iloc[:300], bars.iloc[300:]
+    kw: dict[str, Any] = dict(aux=aux, tolerance=0.5, policy="runtime", warmup=warm)
+    s = AlwaysLong()
+    fresh = neighbourhood_sweep(s, seg, costs(), s.param_grid, **kw)  # type: ignore[arg-type]
+    cont = neighbourhood_sweep(
+        s,
+        seg,
+        costs(),
+        s.param_grid,
+        prev_signal=1.0,
+        **kw,  # type: ignore[arg-type]
+    )
+    assert (fresh.table["n_trades"] == 1).all()
+    assert (cont.table["n_trades"] == 0).all()
+
+
+def test_halted_holdout_is_rejected(
+    tmp_path: Path, ranged_market: tuple[pd.DataFrame, dict[str, pd.Series]]
+) -> None:
+    bars, aux = ranged_market
+    bars, aux = bars.iloc[:1200], {k: v.iloc[:1200] for k, v in aux.items()}
+    touchy = RuntimePolicy(RiskConfig(max_daily_loss=0.002), RuntimeConfig())
+    v = evaluate(
         FeatureStrategy(),
         bars,
         aux,
-        counter=TrialCounter(tmp_path / "b"),
+        costs(),
+        gate_cfg(),
+        TrialCounter(tmp_path / "t"),
         policy="runtime",
-        **kw,  # type: ignore[arg-type]
+        runtime_policy=touchy,
     )
-    assert a.holdout != b.holdout
+    assert v.halted and v.halt_reason in ("daily_loss", "drawdown")
+    assert not v.passed
+    assert any("would have halted the runtime" in r for r in v.reasons)
 
 
-def test_runtime_policy_uses_given_configs(tmp_path: Path) -> None:
-    bars, aux = market(1)
-    bars = _ranged(bars)
+def test_holdout_reasons_halted() -> None:
+    st = vgate.Stats(2.0, 0.01, 0.6, 3.0, 100, 0.5)
+    assert vgate.holdout_reasons(st, gate_cfg(), ruined=False) == []
+    r = vgate.holdout_reasons(st, gate_cfg(), ruined=False, halted=True)
+    assert len(r) == 1 and "would have halted the runtime" in r[0]
+
+
+def test_runtime_policy_uses_given_configs(
+    ranged_market: tuple[pd.DataFrame, dict[str, pd.Series]],
+) -> None:
+    bars, aux = ranged_market
     tight = RuntimePolicy(RiskConfig(max_leverage=0.01), RuntimeConfig())
     sw = neighbourhood_sweep(
         FeatureStrategy(),
-        bars,
+        bars.iloc[:800],
         costs(),
         FeatureStrategy().param_grid,
         aux=aux,
@@ -149,7 +249,7 @@ def test_runtime_policy_uses_given_configs(tmp_path: Path) -> None:
 
 
 def test_unknown_policy_raises(tmp_path: Path) -> None:
-    bars, aux = market(1)
+    bars, aux = market(1, n=200)
     with pytest.raises(ValueError, match="policy"):
         evaluate(
             FeatureStrategy(),
@@ -162,37 +262,48 @@ def test_unknown_policy_raises(tmp_path: Path) -> None:
         )
 
 
-def test_report_records_runtime_policy_only_when_used(tmp_path: Path) -> None:
-    bars, aux = market(1)
-    bars = _ranged(bars)
-    v_r = evaluate(
-        FeatureStrategy(), bars, aux, costs(), gate_cfg(), TrialCounter(tmp_path / "a")
-    )
-    v_t = evaluate(
-        FeatureStrategy(),
-        bars,
-        aux,
-        costs(),
-        gate_cfg(),
-        TrialCounter(tmp_path / "b"),
-        policy="runtime",
-    )
+def test_report_records_runtime_policy_only_when_used(
+    tmp_path: Path,
+    research_verdict: vgate.Verdict,
+    runtime_run: tuple[vgate.Verdict, list[dict[str, Any]]],
+) -> None:
+    v_r, v_t = research_verdict, runtime_run[0]
     p1, p2 = tmp_path / "r" / "REPORT.md", tmp_path / "t" / "REPORT.md"
     p1.parent.mkdir()
     p2.parent.mkdir()
     write_report([v_r], p1)
     write_report([v_t], p2)
     md1, md2 = p1.read_text(), p2.read_text()
-    assert "policy" not in md1.lower()
-    assert "policy" not in json.loads(p1.with_suffix(".json").read_text())[0]
+    assert "policy" not in md1.lower() and "halt" not in md1.lower()
+    ev1 = json.loads(p1.with_suffix(".json").read_text())[0]
+    assert "policy" not in ev1 and "halted" not in ev1
     assert "Simulation policy: runtime" in md2
-    assert json.loads(p2.with_suffix(".json").read_text())[0]["policy"] == "runtime"
+    assert f"- halted: {v_t.halted}" in md2
+    ev2 = json.loads(p2.with_suffix(".json").read_text())[0]
+    assert ev2["policy"] == "runtime" and ev2["halted"] == v_t.halted
+    assert "halt_reason" in ev2
+    for p, pol in ((p1, "research"), (p2, "runtime")):
+        dep = json.loads((p.parent / "deployed.json").read_text())
+        assert all(d["policy"] == pol for d in dep)
 
 
-def test_run_research_defaults_to_runtime_policy() -> None:
+def test_deployed_entries_carry_the_policy(
+    tmp_path: Path, research_verdict: vgate.Verdict
+) -> None:
+    import dataclasses
+
+    v = dataclasses.replace(research_verdict, passed=True, reasons=[])
+    write_report([v], tmp_path / "REPORT.md")
+    dep = json.loads((tmp_path / "deployed.json").read_text())
+    assert dep[0]["policy"] == "research"
+
+
+def test_run_research_requires_a_policy() -> None:
     mod = runpy.run_path(str(ROOT / "scripts" / "run_research.py"))
     p = mod["build_parser"]()
-    assert p.parse_args([]).policy == "runtime"
+    with pytest.raises(SystemExit):
+        p.parse_args([])  # a counted run must choose deliberately
     assert p.parse_args(["--policy", "research"]).policy == "research"
+    assert p.parse_args(["--policy", "runtime"]).policy == "runtime"
     with pytest.raises(SystemExit):
         p.parse_args(["--policy", "paper"])

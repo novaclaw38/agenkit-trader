@@ -58,6 +58,7 @@ def test_report_and_deployed(tmp_path) -> None:
             "interval": "1h",
             "params": {"thr": 0.5},
             "allowed_regimes": ["range", "trend"],
+            "policy": "research",  # schema: the policy that validated it
         }
     ]
     evidence = json.loads(path.with_suffix(".json").read_text())

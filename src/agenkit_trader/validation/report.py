@@ -8,13 +8,15 @@
 * ``path.with_suffix('.json')``: the full evidence, machine-readable.
 * ``path.parent / 'deployed.json'`` (written LAST, after both report files,
   so a crash can never leave a new deployed.json beside an old report): a JSON list of
-  ``{name, symbol, interval, params, allowed_regimes}`` for passing verdicts
+  ``{name, symbol, interval, params, allowed_regimes, policy}`` for passing verdicts
   only; an empty list when nothing passes, so a stale file never survives.
 
 Policy. Verdicts produced under the runtime-sizing policy
 (``policy="runtime"``) are labelled: the Markdown gets a ``Simulation
-policy:`` line and each JSON entry a ``policy`` key. Research-policy verdicts
-(the committed run) are written exactly as before, without either.
+policy:`` line and a ``- halted:`` evidence line, and each JSON entry
+``policy``, ``halted`` and ``halt_reason`` keys. Research-policy verdicts (the
+committed run) are written to REPORT.md/.json exactly as before. Every
+``deployed.json`` entry records the ``policy`` that validated it.
 
 JSON never contains ``NaN``/``Infinity``: a non-finite float ``x`` stored
 under key ``k`` is written as ``k: null`` plus ``k_nonfinite: "inf" | "-inf" |
@@ -90,7 +92,12 @@ def _cell(text: str) -> str:
 def evidence(v: Verdict) -> dict[str, Any]:
     out = _evidence(v)
     if v.policy != "research":
-        out = {"policy": v.policy, **out}
+        out = {
+            "policy": v.policy,
+            **out,
+            "halted": v.halted,
+            "halt_reason": v.halt_reason,
+        }
     return out
 
 
@@ -173,6 +180,10 @@ def write_report(verdicts: list[Verdict], path: Path) -> None:
             f"- allowed regimes: {', '.join(v.allowed_regimes) or 'none'}",
             f"- sweep stable: {v.sweep.stable} {v.sweep.reason}",
         ]
+        if v.policy != "research":
+            lines.append(
+                f"- halted: {v.halted}" + (f" ({v.halt_reason})" if v.halted else "")
+            )
         for label, s in (
             ("train", v.train),
             ("hold-out", v.holdout),
@@ -199,6 +210,7 @@ def write_report(verdicts: list[Verdict], path: Path) -> None:
             "interval": v.interval,
             "params": v.params,
             "allowed_regimes": v.allowed_regimes,
+            "policy": v.policy,
         }
         for v in verdicts
         if v.passed
