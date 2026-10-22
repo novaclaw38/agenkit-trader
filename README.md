@@ -85,6 +85,16 @@ Live trading is locked and NOT implemented. `agenkit live` (interactive
 terminal only) checks the unlock conditions in `config/live.yaml` and places
 nothing, whatever the outcome. See `docs/GOING_LIVE.md`.
 
+### UI (read-only)
+
+    agenkit ui              # http://127.0.0.1:8765/
+
+A local, read-only web page: status, decisions, research, risk limits and
+how the system could fail. It binds 127.0.0.1 only (any other `--host` is
+refused), answers GET only, reads the log, state, research and config files
+afresh on every request, and needs no keys. It shows only what is in those
+files and changes nothing. See `docs/superpowers/specs/2026-10-22-ui-design.md`.
+
 ## What research validated vs what paper runs
 
 A research pass does NOT validate the runtime's sizing or stop policy.

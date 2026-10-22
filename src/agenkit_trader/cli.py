@@ -16,6 +16,9 @@
   the ONLY caller) after the user types the confirmation phrase. Live order
   placement is NOT implemented in this build: even a passed gate places
   nothing. See docs/GOING_LIVE.md.
+* ``agenkit ui [--host 127.0.0.1] [--port 8765]``: local READ-ONLY web view of
+  the log, state, research and config files. Loopback only (any other host is
+  refused), GET only, no keys, no trading code involved.
 
 Exit codes: 0 ok, 2 refused to start / bad config, 3 halted by the kill
 switch, 130 interrupted.
@@ -294,6 +297,25 @@ def _research(args: list[str]) -> int:
     return 0
 
 
+def _ui(a: argparse.Namespace) -> int:
+    from agenkit_trader.ui.server import UiBindError, serve
+
+    if not 0 <= a.port <= 65535:
+        _err("ui: --port must be between 0 and 65535")
+        return EXIT_REFUSED
+    try:
+        serve(a.host, a.port)
+    except UiBindError as exc:
+        _err(f"ui: {exc}")
+        return EXIT_REFUSED
+    except OSError as exc:
+        _err(f"ui: cannot listen on port {a.port}: {exc.strerror}")
+        return EXIT_REFUSED
+    except KeyboardInterrupt:
+        print("\nagenkit ui: stopped")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="agenkit", description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -367,6 +389,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="paper decision log the paper record is derived from "
         "(default: %(default)s)",
     )
+    ui = sub.add_parser(
+        "ui", help="local read-only web view (127.0.0.1 only; changes nothing)"
+    )
+    ui.add_argument(
+        "--host", default="127.0.0.1", help="must be 127.0.0.1 (default: %(default)s)"
+    )
+    ui.add_argument("--port", type=int, default=8765, help="(default: %(default)s)")
     return ap
 
 
@@ -379,6 +408,8 @@ def main(argv: list[str] | None = None) -> int:
         return _paper(a)
     if a.cmd == "live":
         return _live(a)
+    if a.cmd == "ui":
+        return _ui(a)
     return _reset_halt(a)
 
 
