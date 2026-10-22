@@ -154,6 +154,8 @@ class LiveConfig:
     enabled: bool = False
     # Minimum paper (testnet) record before ``agenkit live`` accepts an
     # unlock, measured from the decision log. PROPOSALS, user to confirm.
+    # min_paper_days: days from the first to the last filled paper order.
+    # min_paper_trades: number of FILLED ORDERS (an entry and an exit are two).
     min_paper_days: float = 14.0
     min_paper_trades: int = 30
 

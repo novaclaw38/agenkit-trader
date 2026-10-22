@@ -8,5 +8,7 @@
 enabled: false
 # Minimum paper (testnet) record, measured from the decision log, before
 # `agenkit live` accepts an unlock. PROPOSALS for the user to confirm.
+# min_paper_days: days from the first to the last FILLED paper order.
+# min_paper_trades: counts FILLED ORDERS (an entry and an exit are two).
 min_paper_days: 14            # PROPOSED, user to confirm
 min_paper_trades: 30          # PROPOSED, user to confirm

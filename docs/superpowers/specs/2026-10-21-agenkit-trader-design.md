@@ -169,6 +169,8 @@ Filled in after the research run and the Task 7/8 builds. Everything below is ei
 - The kill switch flattens through the same venue API it guards. If that API is down, the flatten fails (logged `flatten_failed`, and the system stays halted). Only the exchange-side reduce-only stops then protect open positions.
 - There is no client-side rate limiting, and `Retry-After` on 429/418 is ignored.
 
+**The runtime does not trade what research validated.** A research pass does NOT validate the runtime's sizing or stop policy. Research backtests each signal's fractional position (e.g. trend_breakout's vol_cap scaling up to 1x equity) with no stop-outs; the paper runtime keeps only the sign of the signal, sizes for 1% risk at a 3 x ATR(14) exchange-side disaster stop (roughly 0.4x equity notional on ETH 1h, an illustrative estimate) and does not re-enter after a stop-out until a fresh signal transition. The backtest simulates neither the stop nor that rule. Making it do so would be a new research design and a new counted run, for the user to decide.
+
 **Operator error when unlocking.** The live gate is human-only and checks process, not judgement. The following are all outside what the code can prevent:
 - editing `config/live.yaml` by mistake;
 - loosening risk limits before paper trading (they must then hold for the whole paper record);

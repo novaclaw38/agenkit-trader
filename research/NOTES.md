@@ -62,3 +62,8 @@ Future runs (`scripts/run_research.py` via `evaluate_candidates`) add the
 grid points of every strategy x symbol to `research/trials.json` before any
 candidate is evaluated, and test every candidate against that final total.
 The committed report was not regenerated.
+
+## What this research does not validate (added after the committed run)
+
+The runtime does not trade what research validated. A research pass does NOT validate the runtime's sizing or stop policy. Research backtests each signal's fractional position (e.g. trend_breakout's vol_cap scaling up to 1x equity) with no stop-outs; the paper runtime keeps only the sign of the signal, sizes for 1% risk at a 3 x ATR(14) exchange-side disaster stop (roughly 0.4x equity notional on ETH 1h, an illustrative estimate) and does not re-enter after a stop-out until a fresh signal transition. The backtest simulates neither the stop nor that rule. Making it do so would be a new research design and a new counted run, for the user to decide.
+Paper results therefore measure an unvalidated sizing/stop policy.

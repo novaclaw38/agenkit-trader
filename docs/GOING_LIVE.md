@@ -20,7 +20,8 @@ passes only if all of these hold:
    records no kill-switch halt without a later `agenkit reset-halt`.
 3. The paper record in that log covers at least `min_paper_days` (from the
    first to the last filled paper order) and at least `min_paper_trades`
-   filled paper orders. The defaults, 14 days and 30 orders, are proposals
+   filled paper orders. `min_paper_trades` counts FILLED ORDERS, not round
+   trips: an entry and its exit are two. The defaults, 14 days and 30 orders, are proposals
    for you to confirm. The numbers come from the decision log only, never
    from the state file.
 4. Every paper run that filled an order recorded the sha256 of the risk
@@ -49,6 +50,16 @@ never the typed text (only whether it matched).
 - It does not mean a strategy works. The gate checks process, not edge.
 - It does not make the decision log tamper-proof. The gate trusts the log
   on your machine. It protects you from mistakes, not from yourself.
+
+## What the paper record does not show
+
+- **The runtime does not trade what research validated.** A research pass does NOT validate the runtime's sizing or stop policy. Research backtests each signal's fractional position (e.g. trend_breakout's vol_cap scaling up to 1x equity) with no stop-outs; the paper runtime keeps only the sign of the signal, sizes for 1% risk at a 3 x ATR(14) exchange-side disaster stop (roughly 0.4x equity notional on ETH 1h, an illustrative estimate) and does not re-enter after a stop-out until a fresh signal transition. The backtest simulates neither the stop nor that rule. Making it do so would be a new research design and a new counted run, for the user to decide.
+  So a paper record measures the runtime's policy, which no research pass has
+  validated.
+- **Funding is not in the decision records.** Funding paid or received on
+  held perpetual positions changes venue equity (and so the daily-loss and
+  drawdown checks), but no decision record itemises it, and the paper P&L
+  text does not include it.
 
 ## Live execution would need a separate, reviewed task
 
