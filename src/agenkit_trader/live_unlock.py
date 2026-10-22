@@ -116,12 +116,13 @@ class PaperStats:
 
     def __post_init__(self) -> None:
         d, t = self.days, self.trades
-        if isinstance(d, bool) or not isinstance(d, int | float):
-            raise ValueError(f"days must be a number, got {d!r}")
+        # exact builtin types only: no bool, no subclass with odd __eq__
+        if type(d) not in (float, int):
+            raise ValueError(f"days must be a float, got {type(d).__name__}")
         if not math.isfinite(d) or d < 0:
             raise ValueError(f"days must be finite and >= 0, got {d!r}")
-        if isinstance(t, bool) or not isinstance(t, int) or t < 0:
-            raise ValueError(f"trades must be an int >= 0, got {t!r}")
+        if type(t) is not int or t < 0:
+            raise ValueError(f"trades must be an int >= 0, got {type(t).__name__}")
 
 
 class _LiveCredentials:
@@ -339,7 +340,10 @@ def _verify(
     # The paper record is derived HERE from the log just read; the caller's
     # figures must match it exactly (they come from the same log).
     from_log = _stats(recs)
-    if not isinstance(paper_stats, PaperStats) or paper_stats != from_log:
+    if type(paper_stats) is not PaperStats or (
+        float(from_log.days),
+        int(from_log.trades),
+    ) != (float(paper_stats.days), int(paper_stats.trades)):
         raise PaperStatsMismatch(
             f"the paper record supplied ({getattr(paper_stats, 'days', None)!r} "
             f"days, {getattr(paper_stats, 'trades', None)!r} orders) does not match "

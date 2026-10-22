@@ -10,6 +10,12 @@ from typing import Any
 import yaml
 
 
+class ConfigError(ValueError):
+    """Config rejected. The message names only our own field names and value
+    TYPES, never a value or an unknown key from the file (it could be a
+    secret pasted by mistake)."""
+
+
 def _require_finite(obj: object) -> None:
     for f in fields(obj):  # type: ignore[arg-type]
         v = getattr(obj, f.name)
@@ -153,17 +159,23 @@ class LiveConfig:
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
-            raise ValueError(
-                f"enabled must be the boolean true or false, got {self.enabled!r}"
+            raise ConfigError(
+                "enabled must be the boolean true or false, got a value of type "
+                f"{type(self.enabled).__name__}"
             )
         v = self.min_paper_days
         if isinstance(v, bool) or not isinstance(v, int | float):
-            raise ValueError(f"min_paper_days must be a number, got {v!r}")
+            raise ConfigError(
+                f"min_paper_days must be a number, got type {type(v).__name__}"
+            )
         if not math.isfinite(v) or v <= 0:
-            raise ValueError(f"min_paper_days must be finite and > 0, got {v!r}")
+            raise ConfigError("min_paper_days must be finite and > 0")
         t = self.min_paper_trades
         if isinstance(t, bool) or not isinstance(t, int) or t <= 0:
-            raise ValueError(f"min_paper_trades must be a positive int, got {t!r}")
+            raise ConfigError(
+                "min_paper_trades must be a positive int, got a value of type "
+                f"{type(t).__name__}"
+            )
 
 
 def _load_mapping(path: Path) -> dict[str, Any]:
@@ -179,7 +191,8 @@ def _check_keys(cls: type, data: dict[str, Any], path: Path) -> None:
     allowed = {f.name for f in fields(cls)}
     unknown = set(data) - allowed
     if unknown:
-        raise ValueError(f"{path}: unknown keys {sorted(unknown)}")
+        # count only: an unknown key could be a secret pasted by mistake
+        raise ConfigError(f"{path}: {len(unknown)} unknown keys (names not shown)")
 
 
 def load_risk_config(path: Path) -> RiskConfig:

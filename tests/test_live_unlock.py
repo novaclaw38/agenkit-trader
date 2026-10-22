@@ -1232,3 +1232,95 @@ def test_scanner_accepts_the_real_pattern() -> None:
 def test_scanner_flags_evasions(name: str) -> None:
     rel, src = EVASIONS[name]
     assert scan_live_refs(src, rel), name
+
+
+# --------------------------------------------------------------------------
+# fix round 2: bad live.yaml values / key names are never echoed
+
+SK = "sk_live_SECRET123"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        f"enabled: {SK}\n",
+        f"min_paper_days: {SK}\n",
+        f"min_paper_trades: {SK}\n",
+        f"enabled: false\n{SK}: 1\n",
+    ],
+)
+def test_bad_live_config_value_or_key_never_echoed(
+    content: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    risk_path: Path,
+    good_log: DecisionLog,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    live_cfg = tmp_path / "live.yaml"
+    live_cfg.write_text(content)
+    out = FakeTTY()
+    monkeypatch.setattr("sys.stdin", FakeTTY(PHRASE + "\n"))
+    monkeypatch.setattr("sys.stdout", out)
+    rc = cli.main(
+        [
+            "live",
+            "--live-config",
+            str(live_cfg),
+            "--config",
+            str(risk_path),
+            "--log",
+            str(good_log.path),
+        ]
+    )
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert SK not in err and SK not in out.getvalue()
+    assert SK not in good_log.path.read_text()
+    rec = [r for r in records(good_log) if r["kind"] == "live_unlock"][-1]
+    assert rec["result"] == "refused" and rec["output"]["reason"] == "BadLiveConfig"
+
+
+def test_check_keys_reports_count_only(tmp_path: Path) -> None:
+    p = tmp_path / "live.yaml"
+    p.write_text(f"enabled: false\n{SK}: 1\nother_{SK}: 2\n")
+    with pytest.raises(ValueError, match="2 unknown keys") as ei:
+        load_live_config(p)
+    assert SK not in str(ei.value)
+
+
+def test_live_config_value_errors_name_type_not_value() -> None:
+    for kw in ({"enabled": SK}, {"min_paper_days": SK}, {"min_paper_trades": SK}):
+        with pytest.raises(ValueError) as ei:
+            LiveConfig(**kw)  # type: ignore[arg-type]
+        assert SK not in str(ei.value) and "str" in str(ei.value)
+
+
+class _AlwaysEq(float):
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    __hash__ = float.__hash__
+
+
+def test_float_subclass_stats_are_refused(
+    good_log: DecisionLog, risk_path: Path
+) -> None:
+    with pytest.raises(ValueError):
+        PaperStats(_AlwaysEq(1000.0), 1000)
+    forged = object.__new__(PaperStats)
+    object.__setattr__(forged, "days", _AlwaysEq(1000.0))
+    object.__setattr__(forged, "trades", 31)
+    with pytest.raises(PaperStatsMismatch):
+        verify(ENABLED, GOOD_ENV, forged, PHRASE, risk_path, good_log)
+
+
+def test_paperstats_subclass_is_refused(good_log: DecisionLog, risk_path: Path) -> None:
+    class Sub(PaperStats):
+        def __eq__(self, other: object) -> bool:
+            return True
+
+        __hash__ = None  # type: ignore[assignment]
+
+    with pytest.raises(PaperStatsMismatch):
+        verify(ENABLED, GOOD_ENV, Sub(1.0, 1), PHRASE, risk_path, good_log)

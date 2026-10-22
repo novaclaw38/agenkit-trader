@@ -33,6 +33,7 @@ from pathlib import Path
 import yaml
 
 from agenkit_trader.config import (
+    ConfigError,
     load_live_config,
     load_risk_config,
     load_runtime_config,
@@ -241,8 +242,16 @@ def _live(a: argparse.Namespace) -> int:
         return refuse(
             BadLiveConfig(f"bad live config {a.live_config}: {_yaml_where(exc)}")
         )
-    except (OSError, ValueError, TypeError) as exc:
+    except ConfigError as exc:  # sanitized by config.py
         return refuse(BadLiveConfig(f"bad live config {a.live_config}: {exc}"))
+    except OSError as exc:
+        return refuse(
+            BadLiveConfig(f"cannot read live config {a.live_config}: {exc.strerror}")
+        )
+    except (ValueError, TypeError) as exc:  # unsanitized: class name only
+        return refuse(
+            BadLiveConfig(f"bad live config {a.live_config}: {type(exc).__name__}")
+        )
     try:
         stats = paper_stats_from_log(a.log)
     except UnlockError as exc:
