@@ -89,33 +89,40 @@ nothing, whatever the outcome. See `docs/GOING_LIVE.md`.
 
 A research pass does NOT validate the runtime's sizing or stop policy.
 
-- Research backtests each signal's fractional position as-is (for example,
-  trend_breakout's vol_cap scaling goes up to 1x equity) and never stops out.
+- The committed research run held +-1x equity (positions are always -1, 0
+  or +1; trend_breakout's vol_cap is a calm-market filter, not position
+  scaling), rebalanced every bar, with no stops.
 - The paper runtime keeps only the sign of the signal. It sizes so that the
   loss at a 3 x ATR(14) exchange-side disaster stop is at most 1% of equity
   (roughly 0.4x equity notional on ETH 1h; an illustrative estimate, not a
   measurement). After a stop-out it does not re-enter until the signal makes
   a fresh transition.
-- The committed run's backtest simulated neither the disaster stop nor that
-  re-entry rule.
+- The runtime also halts on a 3% daily loss or a 10% drawdown.
+- The committed run's backtest simulated none of the runtime's sizing, the
+  disaster stop, the re-entry rule or the halt.
 
 So paper P&L is not the P&L of what was validated.
 
 A runtime-policy simulator now exists (`backtest/runtime_policy.py`,
 `run_backtest_runtime`). It mirrors the runtime: sign of the signal, entries
-only on a signal transition, 1% risk at the 3 x ATR(14) stop, gate
+only on a signal transition, 1% risk at the 3 x ATR(14) stop rounded to the
+symbol's lot and tick (`config/symbol_rules.yaml`, a testnet snapshot), gate
 rejections skipped, constant quantity, an intrabar exchange stop filled at
-the stop or at a gapping open, no re-entry until a fresh transition. A parity
-test runs it and the real runtime loop on the same synthetic bars and checks
-they make the same trades. `scripts/run_research.py --policy` selects it;
-the default for the NEXT research run is `runtime`, and the report records
-the policy. The COMMITTED run used the research policy; its numbers are
-unchanged and say nothing about the runtime policy.
+the stop or at a gapping open, no re-entry until a fresh transition, and the
+3% daily-loss / 10% drawdown halt (a halted hold-out is rejected). A parity
+test runs it and the real runtime loop on the same synthetic bars, with the
+kill switch enabled and with costs, and checks they make the same trades and
+halt on the same bar. `scripts/run_research.py --policy {research,runtime}`
+is REQUIRED, so a counted run always chooses deliberately; the report and
+`deployed.json` record the policy. The COMMITTED run used the research
+policy; its numbers are unchanged and say nothing about the runtime policy.
 
 Even the runtime policy cannot validate real exchange stop fills, testnet
-fills and fees, or how a 1h-ATR stop interacts with live slippage; it also
-does not simulate the daily-loss/drawdown kill switch. A new run is a new
-counted trial; whether to make one is the user's decision.
+fills and fees, how a 1h-ATR stop interacts with live slippage, or intrabar
+kill-switch triggers other than right after a stop fill. trend_breakout's
+signal on the runtime's 1000-bar window can differ from the full-history
+signal (lookback 336; see `tests/strategies/test_runtime_window.py`). A new
+run is a new counted trial; whether to make one is the user's decision.
 
 ## Development
 

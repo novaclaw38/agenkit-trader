@@ -3,7 +3,7 @@
 holdout_frac: 0.3               # last 30% of history never touched during research
 min_trades: 30                  # fewer trades cannot support a meaningful Sharpe estimate
 min_sharpe: 0.5                 # net of costs, hold-out; modest bar, avoids rewarding noise
-max_drawdown: 0.25              # hold-out drawdown ceiling; looser than live 10% since research is unleveraged-ish
+max_drawdown: 0.25              # hold-out drawdown ceiling (committed run: +-1x equity, no stops). Under --policy runtime the 10% kill-switch halt in risk.yaml binds first and a halted hold-out is rejected
 min_profit_factor: 1.2          # gross win / gross loss; margin above 1.0 for estimation error
 cost_multiplier: 2.0            # strategy must still pass with fees+slippage doubled
 max_trial_adjusted_pvalue: 0.05 # after correcting for number of configurations tried

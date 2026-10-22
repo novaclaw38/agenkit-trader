@@ -83,3 +83,26 @@ now takes `--policy {research,runtime}`; the default for the next run is
 with it, so there are no numbers for it. It cannot validate real exchange
 stop fills, testnet fills or the interaction of a 1h-ATR stop with live
 slippage, and it does not simulate the kill switch.
+
+## Correction (added after the committed run)
+
+The wording in "What this research does not validate" above was wrong:
+research did not back-test "fractional positions" and trend_breakout's
+vol_cap does not scale positions up to 1x equity. Strategy positions are
+always -1, 0 or +1 (`validation/sweep.py` `to_positions`), and vol_cap is a
+boolean calm-market filter. Corrected difference:
+
+- committed run: +-1x equity, rebalanced every bar, no stops;
+- runtime: risk-based sizing (1% of equity at a 3 x ATR(14) stop), constant
+  quantity, exchange-side stop, no re-entry after a stop-out until a fresh
+  signal transition, and a 3% daily-loss / 10% drawdown halt.
+
+The corrected statement is in README.md ("What research validated vs what
+paper runs") and in spec section 12.
+
+Also superseded in the previous section ("Runtime-policy simulator"): the
+simulator now DOES simulate the 3%/10% kill-switch halt (a halted hold-out
+is rejected), rounds quantities and stops with static testnet symbol rules
+(`config/symbol_rules.yaml`), and `--policy` has no default: every counted
+run must choose it explicitly. The committed run's statements and numbers
+are unchanged.
