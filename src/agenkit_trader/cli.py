@@ -10,6 +10,12 @@
   checkout) with the given arguments.
 * ``agenkit reset-halt``: clears a persisted kill-switch halt after the user
   types the confirmation phrase.
+* ``agenkit live [--live-config config/live.yaml] [--config config/risk.yaml]
+  [--log logs/paper.jsonl]``: interactive only (stdin and stdout must be a
+  terminal). Checks the live unlock conditions (``live_unlock.verify``,
+  the ONLY caller) after the user types the confirmation phrase. Live order
+  placement is NOT implemented in this build: even a passed gate places
+  nothing. See docs/GOING_LIVE.md.
 
 Exit codes: 0 ok, 2 refused to start / bad config, 3 halted by the kill
 switch, 130 interrupted.
@@ -24,9 +30,20 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-from agenkit_trader.config import load_risk_config, load_runtime_config
+from agenkit_trader.config import (
+    load_live_config,
+    load_risk_config,
+    load_runtime_config,
+)
 from agenkit_trader.execution.binance_testnet import BinanceTestnetVenue
 from agenkit_trader.killswitch import RESUME_PHRASE, KillSwitch
+from agenkit_trader.live_unlock import (
+    PHRASE,
+    UnlockError,
+    paper_stats_from_log,
+    record_refusal,
+    verify,
+)
 from agenkit_trader.log import DecisionLog, file_sha256
 from agenkit_trader.risk.gate import RiskGate
 from agenkit_trader.runtime.loop import (
@@ -175,6 +192,66 @@ def _reset_halt(a: argparse.Namespace) -> int:
     return 0
 
 
+class NotInteractive(UnlockError):
+    pass
+
+
+class BadLiveConfig(UnlockError):
+    pass
+
+
+def _live(a: argparse.Namespace) -> int:
+    """Human-only unlock check. Never places an order (not built)."""
+    for name in ("live_config", "config", "log"):
+        setattr(a, name, _anchor(getattr(a, name)))
+    log = DecisionLog(a.log)
+    base = {"live_config": str(a.live_config), "risk_config": str(a.config)}
+
+    def refuse(exc: UnlockError, log_it: bool = True) -> int:
+        if log_it:
+            record_refusal(log, exc, base)
+        _err(f"live: refused: {exc}")
+        return EXIT_REFUSED
+
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return refuse(
+            NotInteractive(
+                "`agenkit live` must be run by a person in an interactive "
+                "terminal (stdin and stdout must be a TTY)"
+            )
+        )
+    try:
+        live_cfg = load_live_config(a.live_config)
+    except (OSError, ValueError, TypeError) as exc:
+        return refuse(BadLiveConfig(f"bad live config {a.live_config}: {exc}"))
+    try:
+        stats = paper_stats_from_log(a.log)
+    except UnlockError as exc:
+        return refuse(exc)
+    print(
+        "agenkit live: checks the live-trading unlock conditions.\n"
+        "Live order placement is NOT implemented in this build; nothing will be "
+        "traded whatever the outcome. See docs/GOING_LIVE.md.\n"
+        f"decision log: {a.log}\n"
+        f"paper record: {stats.days:.2f} days, {stats.trades} filled orders "
+        f"(need {live_cfg.min_paper_days} days, {live_cfg.min_paper_trades} orders)"
+    )
+    try:
+        typed = input(f"Type {PHRASE} to continue: ")
+    except EOFError:
+        return refuse(UnlockError("no confirmation phrase was typed"))
+    try:
+        verify(live_cfg, os.environ, stats, typed, a.config, log)
+    except UnlockError as exc:
+        return refuse(exc, log_it=False)  # verify logged it
+    print(
+        "Unlock gate passed. Live execution is not implemented in this build: "
+        "no order was placed and none can be. Going live needs a separate, "
+        "reviewed task run off-sandbox (docs/GOING_LIVE.md)."
+    )
+    return 0
+
+
 def _research(args: list[str]) -> int:
     script = ROOT / "scripts" / "run_research.py"
     if not script.exists():
@@ -212,9 +289,17 @@ def main(argv: list[str] | None = None) -> int:
     r = sub.add_parser("reset-halt", help="clear a persisted kill-switch halt")
     r.add_argument("--state", type=Path, default=Path("state/paper_state.json"))
     r.add_argument("--log", type=Path, default=Path("logs/paper.jsonl"))
+    lv = sub.add_parser(
+        "live", help="check the live unlock conditions (interactive; no trading)"
+    )
+    lv.add_argument("--live-config", type=Path, default=Path("config/live.yaml"))
+    lv.add_argument("--config", type=Path, default=Path("config/risk.yaml"))
+    lv.add_argument("--log", type=Path, default=Path("logs/paper.jsonl"))
     a = ap.parse_args(argv)
     if a.cmd == "paper":
         return _paper(a)
+    if a.cmd == "live":
+        return _live(a)
     return _reset_halt(a)
 
 

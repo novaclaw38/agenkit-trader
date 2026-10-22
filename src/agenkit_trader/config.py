@@ -139,6 +139,33 @@ class RuntimeConfig:
             raise ValueError("bars_limit must exceed atr_window + 1")
 
 
+@dataclass(frozen=True)
+class LiveConfig:
+    """Live-trading gate settings (``config/live.yaml``). Only the human edits
+    that file; no code in this package writes it. ``enabled`` must be a real
+    YAML boolean (a quoted string is rejected) and defaults to false."""
+
+    enabled: bool = False
+    # Minimum paper (testnet) record before ``agenkit live`` accepts an
+    # unlock, measured from the decision log. PROPOSALS, user to confirm.
+    min_paper_days: float = 14.0
+    min_paper_trades: int = 30
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ValueError(
+                f"enabled must be the boolean true or false, got {self.enabled!r}"
+            )
+        v = self.min_paper_days
+        if isinstance(v, bool) or not isinstance(v, int | float):
+            raise ValueError(f"min_paper_days must be a number, got {v!r}")
+        if not math.isfinite(v) or v <= 0:
+            raise ValueError(f"min_paper_days must be finite and > 0, got {v!r}")
+        t = self.min_paper_trades
+        if isinstance(t, bool) or not isinstance(t, int) or t <= 0:
+            raise ValueError(f"min_paper_trades must be a positive int, got {t!r}")
+
+
 def _load_mapping(path: Path) -> dict[str, Any]:
     data = yaml.safe_load(Path(path).read_text())
     if data is None:
@@ -171,3 +198,9 @@ def load_runtime_config(path: Path) -> RuntimeConfig:
     data = _load_mapping(path)
     _check_keys(RuntimeConfig, data, path)
     return RuntimeConfig(**data)
+
+
+def load_live_config(path: Path) -> LiveConfig:
+    data = _load_mapping(path)
+    _check_keys(LiveConfig, data, path)
+    return LiveConfig(**data)
