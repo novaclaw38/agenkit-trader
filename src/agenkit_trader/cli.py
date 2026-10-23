@@ -16,18 +16,24 @@
   the ONLY caller) after the user types the confirmation phrase. Live order
   placement is NOT implemented in this build: even a passed gate places
   nothing. See docs/GOING_LIVE.md.
+* ``agenkit smoke [--symbol BTCUSDT] [--yes]``: one-shot TESTNET plumbing
+  checklist (entry, exchange-side stop, reconcile, close, kill-switch flatten)
+  with your own testnet keys. Testnet only, no strategy, separate log
+  (data/smoke/smoke_log.jsonl) that paper stats and the live unlock never
+  read. See docs/GOING_LIVE.md.
 * ``agenkit ui [--host 127.0.0.1] [--port 8765]``: local READ-ONLY web view of
   the log, state, research and config files. Loopback only (any other host is
   refused), GET only, no keys, no trading code involved.
 
 Exit codes: 0 ok, 2 refused to start / bad config, 3 halted by the kill
-switch, 130 interrupted.
+switch, 130 interrupted; smoke: 1 a step failed, 4 account flat not verified.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import re
 import runpy
 import sys
 from datetime import UTC, datetime
@@ -35,13 +41,15 @@ from pathlib import Path
 
 import yaml
 
+from agenkit_trader import smoke
 from agenkit_trader.config import (
     ConfigError,
     load_live_config,
     load_risk_config,
     load_runtime_config,
+    load_symbol_rules,
 )
-from agenkit_trader.execution.binance_testnet import BinanceTestnetVenue
+from agenkit_trader.execution.binance_testnet import TESTNET_HOST, BinanceTestnetVenue
 from agenkit_trader.killswitch import RESUME_PHRASE, KillSwitch
 from agenkit_trader.live_unlock import (
     PHRASE,
@@ -66,6 +74,9 @@ from agenkit_trader.strategies import REGISTRY
 ROOT = Path(__file__).resolve().parents[2]
 KEY_ENV = "BINANCE_TESTNET_KEY"
 SECRET_ENV = "BINANCE_TESTNET_SECRET"
+
+SMOKE_LOG = ROOT / "data" / "smoke" / "smoke_log.jsonl"
+_SYMBOL_RE = re.compile(r"[A-Z0-9]{5,20}")
 
 EXIT_REFUSED = 2
 EXIT_HALTED = 3
@@ -283,6 +294,80 @@ def _live(a: argparse.Namespace) -> int:
     return 0
 
 
+def _is_tty() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _smoke_clock() -> datetime:
+    return datetime.now(UTC)
+
+
+def _smoke(a: argparse.Namespace) -> int:
+    """Testnet plumbing checklist. Never touches the paper log, state or
+    deployed.json; never prints or logs the keys."""
+    log = smoke.SmokeLog(SMOKE_LOG)
+
+    def refuse(msg: str) -> int:
+        log.write("smoke_run", {}, {"reason": msg}, "refused")
+        _err(f"smoke: refusing to run: {msg}")
+        return EXIT_REFUSED
+
+    if not _SYMBOL_RE.fullmatch(a.symbol):
+        return refuse("--symbol must look like BTCUSDT (A-Z, 0-9)")
+    missing = [v for v in (KEY_ENV, SECRET_ENV) if not os.environ.get(v)]
+    if missing:
+        return refuse(
+            "testnet API credentials missing: set the environment variables "
+            + " and ".join(missing)
+        )
+    try:
+        risk = load_risk_config(_anchor(Path("config/risk.yaml")))
+        rt_cfg = load_runtime_config(_anchor(Path("config/runtime.yaml")))
+        file_rules = load_symbol_rules(_anchor(Path("config/symbol_rules.yaml")))
+    except (OSError, ValueError, TypeError) as exc:
+        return refuse(f"bad configuration: {type(exc).__name__}")
+    print(
+        "agenkit smoke: TESTNET plumbing checklist (no strategy, no signal).\n"
+        f"Venue: https://{TESTNET_HOST} only (mainnet is unreachable from here).\n"
+        f"Symbol: {a.symbol}. It will place two tiny MARKET entries with "
+        "exchange-side stops,\nclose one with a reduce-only order and one through the "
+        "kill switch, then verify the account is flat.\n"
+        "The testnet account must have NO open positions or orders: this "
+        "run flattens the whole account on failure.\n"
+        f"Log: {SMOKE_LOG} (separate from the paper log; never counted)."
+    )
+    if not a.yes:
+        if not _is_tty():
+            return refuse("confirmation needs a terminal; pass --yes to skip it")
+        try:
+            typed = input(f"Type {smoke.CONFIRM_PHRASE} to continue: ")
+        except EOFError:
+            return refuse("no confirmation typed")
+        if typed != smoke.CONFIRM_PHRASE:
+            return refuse("confirmation phrase not given")
+    try:
+        venue = BinanceTestnetVenue(
+            key_env=KEY_ENV, secret_env=SECRET_ENV, recv_window_ms=rt_cfg.recv_window_ms
+        )
+        report = smoke.run_smoke(
+            venue,
+            symbol=a.symbol,
+            risk=risk,
+            file_rules=file_rules,
+            log=log,
+            clock=_smoke_clock,
+        )
+    except (ValueError, smoke.SmokeRefused) as exc:
+        return refuse(smoke._scrub(str(exc)))
+    except KeyboardInterrupt:
+        log.write("smoke_run", {}, {}, "interrupted")
+        _err("smoke: interrupted; CHECK the testnet account for open positions")
+        return 130
+    print(report.table())
+    print(f"Send back: {SMOKE_LOG} (contains no keys).")
+    return report.exit_code
+
+
 def _research(args: list[str]) -> int:
     script = ROOT / "scripts" / "run_research.py"
     if not script.exists():
@@ -389,6 +474,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="paper decision log the paper record is derived from "
         "(default: %(default)s)",
     )
+    sm = sub.add_parser(
+        "smoke", help="one-shot TESTNET plumbing checklist (needs testnet keys)"
+    )
+    sm.add_argument("--symbol", default="BTCUSDT", help="(default: %(default)s)")
+    sm.add_argument(
+        "--yes", action="store_true", help="skip the typed confirmation (no TTY)"
+    )
     ui = sub.add_parser(
         "ui", help="local read-only web view (127.0.0.1 only; changes nothing)"
     )
@@ -408,6 +500,8 @@ def main(argv: list[str] | None = None) -> int:
         return _paper(a)
     if a.cmd == "live":
         return _live(a)
+    if a.cmd == "smoke":
+        return _smoke(a)
     if a.cmd == "ui":
         return _ui(a)
     return _reset_halt(a)

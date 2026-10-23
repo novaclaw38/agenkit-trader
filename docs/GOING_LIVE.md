@@ -61,6 +61,68 @@ never the typed text (only whether it matched).
   drawdown checks), but no decision record itemises it, and the paper P&L
   text does not include it.
 
+## Testnet smoke test (`agenkit smoke`)
+
+A one-shot checklist that proves the order plumbing works against the real
+Binance futures **testnet** before you trust a paper run. It runs on your
+machine with your own testnet keys. It uses no strategy and no signal, never
+moves real money, and was NOT run by the developers (no keys exist in the
+development sandbox): its first real run is yours. Anything it reports about
+the real exchange is a first observation.
+
+It is separate from paper trading. It writes only
+`data/smoke/smoke_log.jsonl` (every record tagged `"mode": "smoke"`). It never
+reads or writes `research/deployed.json`, the paper decision log or the paper
+state, and neither `agenkit live` nor the paper stats read the smoke log, so it
+never counts toward paper days or trades.
+
+### Step by step
+
+1. Create testnet keys: open the Binance Futures testnet
+   (`https://testnet.binancefuture.com`), log in (GitHub login works), open
+   the "API Key" tab and generate a key. These are testnet-only keys and hold
+   test money. Never reuse real-account keys.
+2. Export them in your own shell (not in a file in the repo, never in chat):
+
+       export BINANCE_TESTNET_KEY=...
+       export BINANCE_TESTNET_SECRET=...
+
+3. Make sure the testnet account has **no open positions or orders**. The
+   smoke test refuses otherwise (step 2 fails) and never touches what it did
+   not open. If a step fails it flattens the whole account.
+4. Run it from a checkout, with a synced clock (NTP):
+
+       agenkit smoke                 # prints the plan, asks you to type SMOKE TESTNET
+       agenkit smoke --symbol ETHUSDT --yes   # skip the prompt (e.g. no TTY)
+
+   The symbol must be in `config/symbol_rules.yaml`. Only the testnet host is
+   reachable; there is no option to change it.
+5. Read the summary table. Exit code 0: all eight steps passed and the account
+   was verified flat. 1: a step failed (account flat). 4: the account could not
+   be verified flat; check the testnet account by hand. 2: refused to start.
+
+### What each step means
+
+| # | Step | pass | fail |
+|---|------|------|------|
+| 1 | connectivity, clock skew, exchangeInfo rules equal `config/symbol_rules.yaml` | exchange reachable, skew under 1 s, tick/lot/min notional match | network or clock problem, or the testnet rules drifted: update the yaml (a counted config change) or re-check |
+| 2 | account balance read; account must be flat | signed reads work, equity shown | bad keys/permissions, or the account already holds a position/order |
+| 3 | MARKET entry at the smallest valid size through the real RiskGate | gate allowed, order filled | gate rejection (reason shown, e.g. equity too small for the risk limit), or the exchange refused |
+| 4 | the exchange-side stop appears | `place_stop` returned an id and the stop is listed as a reduce-only STOP_MARKET at the right price and size | the exact exchange answer is shown: an API error (code and text), or "returned id X but not listed", or a listed order that differs. This is the untested Algo Service path: send this back |
+| 5 | reconcile: position and stop as the runtime's reconcile expects | position equals the fill and our stop is a closing-side reduce-only stop | the runtime would not recognise the stop |
+| 6 | stop-coverage check as the runtime does it | stops cover the position | the runtime would repair, then halt |
+| 7 | cancel the stop, close with a reduce-only order, verify flat | stop gone, position closed | cancel or reduce-only close not honoured |
+| 8 | KillSwitch flatten with a second position (and stop) | `flattened_ok`, no orders, no positions | the kill-switch path does not flatten on the real exchange: serious |
+
+A failed step stops the run, attempts a flatten and reports. Every run ends by
+checking that the account is flat.
+
+### What to send back
+
+The summary table (copy it from the terminal) and `data/smoke/smoke_log.jsonl`.
+Neither contains your keys. Look through the log once before sharing it: it
+shows your testnet equity.
+
 ## Live execution would need a separate, reviewed task
 
 Building real-money order placement is out of scope here. It needs its own

@@ -628,3 +628,14 @@ def test_market_fill_fee_is_unknown_not_zero(keys: None) -> None:
     s = _flatten_server([])
     o = Order("BTCUSDT", "buy", 0.012, 50000.0, 49000.0, "trend", "akabc", False)
     assert venue(s).place_order(o).fee is None
+
+
+def test_open_algo_orders_raw_returns_exchange_rows_for_symbol(keys: None) -> None:
+    s = Server()
+    rows = [
+        {"symbol": "BTCUSDT", "algoId": 5, "clientAlgoId": "x", "algoStatus": "NEW"},
+        {"symbol": "ETHUSDT", "algoId": 6, "clientAlgoId": "y", "algoStatus": "NEW"},
+    ]
+    s.routes[("GET", "/fapi/v1/openAlgoOrders")] = lambda r: rows
+    out = venue(s).open_algo_orders_raw("BTCUSDT")
+    assert out == [rows[0]]

@@ -388,6 +388,15 @@ class BinanceTestnetVenue:
             )
         return out
 
+    def open_algo_orders_raw(self, symbol: str) -> list[dict[str, Any]]:
+        """Open Algo Service orders for ``symbol`` exactly as the exchange
+        returned them (diagnostics, e.g. ``agenkit smoke``). Order data only;
+        it never contains credentials."""
+        rows = self._request(
+            "GET", "/fapi/v1/openAlgoOrders", {"symbol": symbol}, signed=True
+        )
+        return [r for r in rows if r.get("symbol") == symbol]
+
     # ------------------------------------------------------------ orders
 
     def _market(
