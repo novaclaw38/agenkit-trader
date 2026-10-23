@@ -1,0 +1,528 @@
+"""``agenkit`` command line.
+
+* ``agenkit paper [--config config/risk.yaml] [--runtime config/runtime.yaml]
+  [--deployed research/deployed.json] [--once]``: paper trading on the
+  Binance Futures TESTNET. Refuses to start (non-zero exit, no network call)
+  unless ``deployed.json`` lists at least one strategy signed off by the
+  validation gate. There is no bypass. Keys come only from the environment
+  variables BINANCE_TESTNET_KEY / BINANCE_TESTNET_SECRET.
+* ``agenkit research [args...]``: runs ``scripts/run_research.py`` (repo
+  checkout) with the given arguments.
+* ``agenkit reset-halt``: clears a persisted kill-switch halt after the user
+  types the confirmation phrase.
+* ``agenkit live [--live-config config/live.yaml] [--config config/risk.yaml]
+  [--log logs/paper.jsonl]``: interactive only (stdin and stdout must be a
+  terminal). Checks the live unlock conditions (``live_unlock.verify``,
+  the ONLY caller) after the user types the confirmation phrase. Live order
+  placement is NOT implemented in this build: even a passed gate places
+  nothing. See docs/GOING_LIVE.md.
+* ``agenkit smoke [--symbol BTCUSDT] [--yes]``: one-shot TESTNET plumbing
+  checklist (entry, exchange-side stop, reconcile, close, kill-switch flatten)
+  with your own testnet keys. Testnet only, no strategy, separate log
+  (data/smoke/smoke_log.jsonl) that paper stats and the live unlock never
+  read. See docs/GOING_LIVE.md.
+* ``agenkit ui [--host 127.0.0.1] [--port 8765]``: local READ-ONLY web view of
+  the log, state, research and config files. Loopback only (any other host is
+  refused), GET only, no keys, no trading code involved.
+
+Exit codes: 0 ok, 2 refused to start / bad config, 3 halted by the kill
+switch, 130 interrupted; smoke: 1 a step failed, 4 account flat not verified.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import os
+import re
+import runpy
+import signal
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from agenkit_trader import smoke
+from agenkit_trader.config import (
+    ConfigError,
+    load_live_config,
+    load_risk_config,
+    load_runtime_config,
+    load_symbol_rules,
+)
+from agenkit_trader.execution.binance_testnet import TESTNET_HOST, BinanceTestnetVenue
+from agenkit_trader.killswitch import RESUME_PHRASE, KillSwitch
+from agenkit_trader.live_unlock import (
+    PHRASE,
+    UnlockError,
+    paper_stats_from_log,
+    record_refusal,
+    verify,
+)
+from agenkit_trader.log import DecisionLog, file_sha256
+from agenkit_trader.risk.gate import RiskGate
+from agenkit_trader.runtime.loop import (
+    DeployedError,
+    StartupRefused,
+    check_state_ready,
+    load_deployed,
+    reset_halt,
+    run_loop,
+    validate_deployments,
+)
+from agenkit_trader.strategies import REGISTRY
+
+ROOT = Path(__file__).resolve().parents[2]
+KEY_ENV = "BINANCE_TESTNET_KEY"
+SECRET_ENV = "BINANCE_TESTNET_SECRET"
+
+SMOKE_LOG = ROOT / "data" / "smoke" / "smoke_log.jsonl"
+_SYMBOL_RE = re.compile(r"[A-Z0-9]{5,20}")
+
+EXIT_REFUSED = 2
+EXIT_HALTED = 3
+
+
+def _err(msg: str) -> None:
+    print(f"agenkit: {msg}", file=sys.stderr)
+
+
+def _sha(path: Path) -> str | None:
+    try:
+        return file_sha256(path)
+    except OSError:
+        return None
+
+
+def _anchor(p: Path) -> Path:
+    """Relative paths are anchored to the repository root, never the cwd, so
+    the same command always finds the same state, log and configs."""
+    p = Path(p).expanduser()
+    return p if p.is_absolute() else ROOT / p
+
+
+def _paper(a: argparse.Namespace) -> int:
+    for name in ("config", "runtime", "gate", "deployed", "log", "state"):
+        setattr(a, name, _anchor(getattr(a, name)))
+    log = DecisionLog(a.log)
+
+    def refuse(msg: str) -> int:
+        log.write("runtime", {}, {"reason": msg}, "refused")
+        _err(f"paper: refusing to start: {msg}")
+        return EXIT_REFUSED
+
+    log.write(
+        "startup",
+        {
+            "risk_config": str(a.config),
+            "risk_config_sha256": _sha(a.config),
+            "runtime_config": str(a.runtime),
+            "runtime_config_sha256": _sha(a.runtime),
+            "gate_config_sha256": _sha(a.gate),
+            "deployed": str(a.deployed),
+            "deployed_sha256": _sha(a.deployed),
+            "once": a.once,
+            "state": str(a.state),
+            "init_state": a.init_state,
+        },
+        {},
+        "starting",
+    )
+    try:
+        risk = load_risk_config(a.config)
+        rt_cfg = load_runtime_config(a.runtime)
+    except (OSError, ValueError, TypeError) as exc:
+        return refuse(f"bad configuration: {exc}")
+    try:
+        deployed = load_deployed(a.deployed)
+        validate_deployments(deployed, REGISTRY)
+    except (DeployedError, StartupRefused) as exc:
+        return refuse(str(exc))
+    _err(f"paper: state file: {a.state}")
+    _err(f"paper: decision log: {a.log}")
+    try:
+        check_state_ready(a.state, a.log, a.init_state)
+    except StartupRefused as exc:
+        return refuse(str(exc))
+    missing = [v for v in (KEY_ENV, SECRET_ENV) if not os.environ.get(v)]
+    if missing:
+        return refuse(
+            "testnet API credentials missing: set the environment variables "
+            + " and ".join(missing)
+        )
+    venue = BinanceTestnetVenue(
+        key_env=KEY_ENV, secret_env=SECRET_ENV, recv_window_ms=rt_cfg.recv_window_ms
+    )
+    log.write("startup", {"venue": repr(venue)}, {}, "venue_ready")
+    gate = RiskGate(risk, venue.symbol_rules, log)
+    kill = KillSwitch(venue, log, risk)
+    try:
+        run_loop(
+            venue,
+            list(REGISTRY.values()),
+            deployed,
+            gate,
+            kill,
+            log,
+            lambda: datetime.now(UTC),
+            runtime_cfg=rt_cfg,
+            max_cycles=1 if a.once else None,
+            state_path=a.state,
+            init_state=a.init_state,
+        )
+    except StartupRefused as exc:
+        return refuse(str(exc))
+    except KeyboardInterrupt:
+        log.write("runtime", {}, {}, "interrupted")
+        _err("paper: interrupted; open positions and their stops are left as is")
+        return 130
+    if kill.halted:
+        _err(
+            f"paper: HALTED by the kill switch; see {a.log}. Positions were "
+            "flattened (check the log for flatten_failed). Restart requires "
+            "`agenkit reset-halt`."
+        )
+        return EXIT_HALTED
+    return 0
+
+
+def _reset_halt(a: argparse.Namespace) -> int:
+    a.state, a.log = _anchor(a.state), _anchor(a.log)
+    print(f"state file: {a.state}\ndecision log: {a.log}")
+    phrase = input(f"Type {RESUME_PHRASE} to clear the halt: ")
+    if phrase != RESUME_PHRASE:
+        _err("reset-halt: confirmation phrase not given; halt kept")
+        return 1
+    try:
+        cleared = reset_halt(a.state, DecisionLog(a.log))
+    except StartupRefused as exc:
+        _err(
+            f"reset-halt: {exc}\n"
+            f"Nothing was changed. To recover: inspect {a.log} and repair the "
+            "malformed line by hand (e.g. a line truncated by a crash), or move "
+            "the file aside (keep it for the record), then rerun "
+            "`agenkit reset-halt`. With the log moved aside, the next "
+            "`agenkit paper` start writes a fresh log; if the state file is also "
+            "missing it needs --init-state, which is logged."
+        )
+        return EXIT_REFUSED
+    print("halt cleared" if cleared else "no halt was recorded")
+    return 0
+
+
+class NotInteractive(UnlockError):
+    pass
+
+
+class BadLiveConfig(UnlockError):
+    pass
+
+
+def _yaml_where(exc: yaml.YAMLError) -> str:
+    """Error class and line/column only; never the message or a snippet."""
+    mark = getattr(exc, "problem_mark", None) or getattr(exc, "context_mark", None)
+    where = (
+        f" at line {mark.line + 1}, column {mark.column + 1}"
+        if mark is not None
+        else " (line unknown)"
+    )
+    return f"YAML parse error {type(exc).__name__}{where}; contents not shown"
+
+
+def _live(a: argparse.Namespace) -> int:
+    """Human-only unlock check. Never places an order (not built)."""
+    for name in ("live_config", "config", "log"):
+        setattr(a, name, _anchor(getattr(a, name)))
+    log = DecisionLog(a.log)
+    base = {"live_config": str(a.live_config), "risk_config": str(a.config)}
+
+    def refuse(exc: UnlockError, log_it: bool = True) -> int:
+        if log_it:
+            record_refusal(log, exc, base)
+        _err(f"live: refused: {exc}")
+        return EXIT_REFUSED
+
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return refuse(
+            NotInteractive(
+                "`agenkit live` must be run by a person in an interactive "
+                "terminal (stdin and stdout must be a TTY)"
+            )
+        )
+    try:
+        live_cfg = load_live_config(a.live_config)
+    except yaml.YAMLError as exc:
+        # PyYAML messages quote the offending line, which could hold a secret
+        # pasted by mistake: report only the error class and the position.
+        return refuse(
+            BadLiveConfig(f"bad live config {a.live_config}: {_yaml_where(exc)}")
+        )
+    except ConfigError as exc:  # sanitized by config.py
+        return refuse(BadLiveConfig(f"bad live config {a.live_config}: {exc}"))
+    except OSError as exc:
+        return refuse(
+            BadLiveConfig(f"cannot read live config {a.live_config}: {exc.strerror}")
+        )
+    except (ValueError, TypeError) as exc:  # unsanitized: class name only
+        return refuse(
+            BadLiveConfig(f"bad live config {a.live_config}: {type(exc).__name__}")
+        )
+    try:
+        stats = paper_stats_from_log(a.log)
+    except UnlockError as exc:
+        return refuse(exc)
+    print(
+        "agenkit live: checks the live-trading unlock conditions.\n"
+        "Live order placement is NOT implemented in this build; nothing will be "
+        "traded whatever the outcome. See docs/GOING_LIVE.md.\n"
+        f"decision log: {a.log}\n"
+        f"paper record: {stats.days:.2f} days, {stats.trades} filled orders "
+        f"(need {live_cfg.min_paper_days} days, {live_cfg.min_paper_trades} orders)"
+    )
+    try:
+        typed = input(f"Type {PHRASE} to continue: ")
+    except EOFError:
+        return refuse(UnlockError("no confirmation phrase was typed"))
+    try:
+        verify(live_cfg, os.environ, stats, typed, a.config, log)
+    except UnlockError as exc:
+        return refuse(exc, log_it=False)  # verify logged it
+    print(
+        "Unlock gate passed. Live execution is not implemented in this build: "
+        "no order was placed and none can be. Going live needs a separate, "
+        "reviewed task run off-sandbox (docs/GOING_LIVE.md)."
+    )
+    return 0
+
+
+def _is_tty() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _smoke_clock() -> datetime:
+    return datetime.now(UTC)
+
+
+def _smoke(a: argparse.Namespace) -> int:
+    """Testnet plumbing checklist. Never touches the paper log, state or
+    deployed.json; never prints or logs the keys. The smoke log (and its
+    directory) is created only after the arguments and confirmation pass."""
+    log: smoke.SmokeLog | None = None
+
+    def refuse(msg: str) -> int:
+        if log is not None:
+            log.write("smoke_run", {}, {"reason": msg}, "refused")
+        _err(f"smoke: refusing to run: {msg}")
+        return EXIT_REFUSED
+
+    if not _SYMBOL_RE.fullmatch(a.symbol):
+        return refuse("--symbol must look like BTCUSDT (A-Z, 0-9)")
+    missing = [v for v in (KEY_ENV, SECRET_ENV) if not os.environ.get(v)]
+    if missing:
+        return refuse(
+            "testnet API credentials missing: set the environment variables "
+            + " and ".join(missing)
+        )
+    try:
+        risk = load_risk_config(_anchor(Path("config/risk.yaml")))
+        rt_cfg = load_runtime_config(_anchor(Path("config/runtime.yaml")))
+        file_rules = load_symbol_rules(_anchor(Path("config/symbol_rules.yaml")))
+    except (OSError, ValueError, TypeError) as exc:
+        return refuse(f"bad configuration: {type(exc).__name__}")
+    print(
+        "agenkit smoke: TESTNET plumbing checklist (no strategy, no signal).\n"
+        f"Venue: https://{TESTNET_HOST} only (mainnet is unreachable from here).\n"
+        f"Symbol: {a.symbol}. It will place two tiny MARKET entries with "
+        "exchange-side stops,\nclose one with a reduce-only order and one through "
+        "the kill switch, then verify the account is flat.\n"
+        "The testnet account must have NO open positions or orders: this "
+        "run flattens the whole account on failure.\n"
+        f"Log: {SMOKE_LOG} (separate from the paper log; never counted)."
+    )
+    if not a.yes:
+        if not _is_tty():
+            return refuse("confirmation needs a terminal; pass --yes to skip it")
+        try:
+            typed = input(f"Type {smoke.CONFIRM_PHRASE} to continue: ")
+        except EOFError:
+            return refuse("no confirmation typed")
+        if typed != smoke.CONFIRM_PHRASE:
+            return refuse("confirmation phrase not given")
+    log = smoke.SmokeLog(SMOKE_LOG)
+
+    def on_signal(signum: int, frame: object) -> None:
+        raise KeyboardInterrupt  # run_smoke then cleans up and verifies flat
+
+    old: dict[int, Any] = {}
+    for name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            with contextlib.suppress(ValueError):  # not the main thread
+                old[sig] = signal.signal(sig, on_signal)
+    try:
+        venue = BinanceTestnetVenue(
+            key_env=KEY_ENV, secret_env=SECRET_ENV, recv_window_ms=rt_cfg.recv_window_ms
+        )
+        report = smoke.run_smoke(
+            venue,
+            symbol=a.symbol,
+            risk=risk,
+            file_rules=file_rules,
+            log=log,
+            clock=_smoke_clock,
+        )
+    except (ValueError, smoke.SmokeRefused) as exc:
+        return refuse(smoke._scrub(str(exc)))
+    finally:
+        for sig, handler in old.items():
+            signal.signal(sig, handler)
+    print(report.table())
+    if report.interrupted:
+        _err("smoke: interrupted; see the flat check above")
+    print(f"Send back: {SMOKE_LOG} (contains no keys).")
+    return report.exit_code
+
+
+def _research(args: list[str]) -> int:
+    script = ROOT / "scripts" / "run_research.py"
+    if not script.exists():
+        _err(f"research: {script} not found (run from a repository checkout)")
+        return EXIT_REFUSED
+    old = sys.argv
+    sys.argv = [str(script), *args]
+    try:
+        runpy.run_path(str(script), run_name="__main__")
+    finally:
+        sys.argv = old
+    return 0
+
+
+def _ui(a: argparse.Namespace) -> int:
+    from agenkit_trader.ui.server import UiBindError, serve
+
+    if not 0 <= a.port <= 65535:
+        _err("ui: --port must be between 0 and 65535")
+        return EXIT_REFUSED
+    try:
+        serve(a.host, a.port)
+    except UiBindError as exc:
+        _err(f"ui: {exc}")
+        return EXIT_REFUSED
+    except OSError as exc:
+        _err(f"ui: cannot listen on port {a.port}: {exc.strerror}")
+        return EXIT_REFUSED
+    except KeyboardInterrupt:
+        print("\nagenkit ui: stopped")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(prog="agenkit", description=__doc__.split("\n")[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser(
+        "research",
+        help="run scripts/run_research.py (counts trials; see research/NOTES.md)",
+        description="All arguments are passed to scripts/run_research.py; "
+        "`agenkit research -h` shows them.",
+    )
+    state_help = "paper state file (relative paths are anchored to the repo root)"
+    log_help = "decision log, JSON lines (relative paths anchored to the repo root)"
+    p = sub.add_parser("paper", help="paper trade deployed strategies on testnet")
+    p.add_argument(
+        "--config",
+        type=Path,
+        default=Path("config/risk.yaml"),
+        help="RISK config (default: config/risk.yaml); not runtime.yaml",
+    )
+    p.add_argument(
+        "--runtime",
+        type=Path,
+        default=Path("config/runtime.yaml"),
+        help="runtime config: interval, stops, polling (default: %(default)s)",
+    )
+    p.add_argument(
+        "--deployed",
+        type=Path,
+        default=Path("research/deployed.json"),
+        help="strategies signed off by the validation gate (default: %(default)s)",
+    )
+    p.add_argument(
+        "--gate",
+        type=Path,
+        default=Path("config/gate.yaml"),
+        help="gate config, hashed into the startup record (default: %(default)s)",
+    )
+    p.add_argument("--log", type=Path, default=Path("logs/paper.jsonl"), help=log_help)
+    p.add_argument(
+        "--state", type=Path, default=Path("state/paper_state.json"), help=state_help
+    )
+    p.add_argument("--once", action="store_true", help="run a single cycle and exit")
+    p.add_argument(
+        "--init-state",
+        action="store_true",
+        help="create a NEW state file if none exists (new paper account)",
+    )
+    r = sub.add_parser("reset-halt", help="clear a persisted kill-switch halt")
+    r.add_argument(
+        "--state", type=Path, default=Path("state/paper_state.json"), help=state_help
+    )
+    r.add_argument("--log", type=Path, default=Path("logs/paper.jsonl"), help=log_help)
+    lv = sub.add_parser(
+        "live", help="check the live unlock conditions (interactive; no trading)"
+    )
+    lv.add_argument(
+        "--live-config",
+        type=Path,
+        default=Path("config/live.yaml"),
+        help="live unlock thresholds (default: %(default)s)",
+    )
+    lv.add_argument(
+        "--config",
+        type=Path,
+        default=Path("config/risk.yaml"),
+        help="RISK config checked by the unlock gate (default: %(default)s)",
+    )
+    lv.add_argument(
+        "--log",
+        type=Path,
+        default=Path("logs/paper.jsonl"),
+        help="paper decision log the paper record is derived from "
+        "(default: %(default)s)",
+    )
+    sm = sub.add_parser(
+        "smoke", help="one-shot TESTNET plumbing checklist (needs testnet keys)"
+    )
+    sm.add_argument("--symbol", default="BTCUSDT", help="(default: %(default)s)")
+    sm.add_argument(
+        "--yes", action="store_true", help="skip the typed confirmation (no TTY)"
+    )
+    ui = sub.add_parser(
+        "ui", help="local read-only web view (127.0.0.1 only; changes nothing)"
+    )
+    ui.add_argument(
+        "--host", default="127.0.0.1", help="must be 127.0.0.1 (default: %(default)s)"
+    )
+    ui.add_argument("--port", type=int, default=8765, help="(default: %(default)s)")
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "research":
+        return _research(argv[1:])
+    a = build_parser().parse_args(argv)
+    if a.cmd == "paper":
+        return _paper(a)
+    if a.cmd == "live":
+        return _live(a)
+    if a.cmd == "smoke":
+        return _smoke(a)
+    if a.cmd == "ui":
+        return _ui(a)
+    return _reset_halt(a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

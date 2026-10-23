@@ -1,0 +1,24 @@
+# Research round 2 (pre-registered in
+# docs/superpowers/specs/2026-10-22-preregistration-round2.md, FROZEN).
+# Use:  scripts/run_research.py --config config/research_round2.yaml \
+#           --policy runtime [--plan]
+# Everything here repeats the pre-registration; changing a value after results
+# are seen is a new, counted round (say so in research/NOTES.md).
+# SOLUSDT, XRPUSDT, LTCUSDT dropped before any evaluation: DataGapError in the
+# 4h archive (2022-02-26..28 missing). See addendum symbol-drop rule + NOTES.md.
+symbols: [BTCUSDT, ETHUSDT, BNBUSDT, DOGEUSDT, ADAUSDT, LINKUSDT, AVAXUSDT]
+interval: 4h
+start: 2021-01-01
+end: 2026-10-01          # end-exclusive: through 2026-09-30
+out: research/round2/REPORT.md      # evidence + deployed.json land beside it
+trials: research/trials.json        # SHARED counter: continues from round 1
+strategies:
+  trend_breakout_r2:                # trend_breakout signal, own name (deployable grid)
+    grid: {lookback: [42, 84, 168], vol_cap: [1.5]}
+  trend_funding_filter:
+    grid: {lookback: [42, 84, 168], thr: [0.0003, 0.0006], vol_cap: [1.5]}
+# Checked before any data is loaded or any trial is counted (and by --plan).
+expect:
+  per_strategy: {trend_breakout_r2: 21, trend_funding_filter: 42}
+  new_trials: 63
+  total_after: 123

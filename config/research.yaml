@@ -1,0 +1,10 @@
+# Research cost assumptions used by scripts/run_research.py.
+# taker_fee / maker_fee: Binance USD-M futures base tier (VIP0) published rates.
+# half_spread_bps and slippage_bps are ASSUMPTIONS, not measurements: they must
+# be verified against exchange info / order-book data and the account's actual
+# fee tier. Mainnet APIs are unreachable from the research sandbox, so they
+# could not be fetched. The gate re-runs every hold-out at 2x these costs.
+taker_fee: 0.0005      # per side
+maker_fee: 0.0002      # per side (unused: research assumes taker fills)
+half_spread_bps: 1.0   # ASSUMPTION: BTC/ETH perp top-of-book spread is ~0.1-1 bp; 1 bp is conservative
+slippage_bps: 2.0      # ASSUMPTION: extra adverse move per fill for small market orders

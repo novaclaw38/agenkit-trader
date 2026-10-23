@@ -1,0 +1,14 @@
+# Live-trading gate (spec section 7). Edited by the human only: no code in this
+# repository (including the paper runtime) writes this file.
+# Live order placement is NOT implemented in this build: `agenkit live` only
+# checks the unlock conditions. See docs/GOING_LIVE.md.
+#
+# enabled must stay false unless YOU decide to go live. It must be a YAML
+# boolean (true/false); a quoted string is rejected.
+enabled: false
+# Minimum paper (testnet) record, measured from the decision log, before
+# `agenkit live` accepts an unlock. PROPOSALS for the user to confirm.
+# min_paper_days: days from the first to the last FILLED paper order.
+# min_paper_trades: counts FILLED ORDERS (an entry and an exit are two).
+min_paper_days: 14            # PROPOSED, user to confirm
+min_paper_trades: 30          # PROPOSED, user to confirm

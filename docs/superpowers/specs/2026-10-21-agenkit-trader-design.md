@@ -118,4 +118,64 @@ Each deployed strategy ships with stop criteria derived from its validated bound
 
 ## 12. HOW COULD THIS SYSTEM FAIL?
 
-To be completed with measured results after research. Known risks at design time: overfitting despite the gate, testnet fills flattering results, exchange outage or API change, data feed gaps, regime change, correlated positions across strategies, operator error when unlocking live mode.
+Filled in after the research run and the Task 7/8 builds. Everything below is either measured, observed in code review, or stated as an unverified assumption. Nothing here is a claim of profitability.
+
+**Research: a null result.**
+- One pass over BTCUSDT and ETHUSDT, 1h bars, 2021-01-01 to 2026-10-01: 60 trials.
+- 0 of 6 strategy x symbol candidates passed the validation gate. `research/deployed.json` is empty, so `agenkit paper` refuses to start.
+- The best-looking candidate, ETHUSDT trend_breakout, had a hold-out Sharpe of 0.58, but was rejected for:
+  - hold-out drawdown of 52.1% (limit 25%);
+  - an unstable parameter sweep;
+  - a trial-adjusted p-value of 0.94.
+- `funding_reversion` is untested, not refuted. The hold-out held 0 BTCUSDT and 1 ETHUSDT funding settlements beyond +-0.03%, against 430 and 496 in train, so it made 0 and 1 trades.
+- Any change to a strategy needs a new research run, counted in `research/trials.json`.
+
+**Costs are assumptions.** The 1 bp half-spread and 2 bp slippage in `config/research.yaml` were not measured, because the mainnet order book is unreachable from the sandbox. The gate re-tests at 2x costs, but real costs could still be higher, and the account's real fee tier is unknown. Fees are not read back from fills: `Fill.fee` is None and the decision log says "fee unknown".
+
+**Testnet vs mainnet fills.** Paper trading runs on the Binance Futures testnet. Its liquidity, spreads, fills and funding are not mainnet's, so paper results can flatter or distort live behaviour. Research used mainnet archive data; the runtime uses testnet prices. No live fill has ever been observed.
+
+**Exchange API changes.**
+- Since 2025-12-09, `POST /fapi/v1/order` rejects STOP_MARKET (-4120). Protective stops therefore use the algo-order endpoints.
+- That change was verified against the production Binance docs only. Two things are unverified: that the testnet has the same migration, and the response shape of `openAlgoOrders`.
+- The signed endpoints were tested against mocks only, because no testnet keys were available. The first real paper run must confirm that a stop is actually placed.
+- Any future API change can break order or stop handling. Each such failure is counted as an API error, and five errors within 300 s trip the kill switch.
+
+**In-memory repair state.** The stop-repair bookkeeping (one repair per uncovered episode) is held in memory only. A crash-looping process gets one repair attempt per restart. A persisted halt blocks restart once the kill switch has tripped, but repeated restarts without a halt are not bounded.
+
+**Regime labels are not reproducible at runtime.** Research labelled regimes with an expanding median over years of history; the runtime fetches at most 1499 bars. With the default 1000-bar window (`bars_limit: 1000`), the labels differed on about 4% of bars, as measured in the Task 7 review; the difference at other window lengths was not measured. A deployment restricted to some regimes is therefore refused at start (fail closed). Only unrestricted deployments can run.
+
+**Unowned positions.**
+- Ownership is per symbol: one deployed strategy per symbol.
+- A position or open order on a symbol no deployed strategy owns makes start refuse. With `flatten_unowned_on_start: true`, it instead trips the kill switch.
+- The kill switch's `flatten_all` closes every position on the account, including manual ones.
+- Hedge mode is not supported.
+- Paper equity assumes no external transfers and no testnet resets.
+
+**Narrow universe.** Only two symbols (BTCUSDT, ETHUSDT) were researched. This is survivorship bias: both are the largest, longest-lived perpetuals. Nothing says the results, null or otherwise, generalise.
+
+**No live execution.** Live order placement is not built. `agenkit live` validates the unlock gate only, and `LiveVenue` refuses every call. Every live-specific failure mode (real fills, mainnet rate limits, real liquidation risk) is untested. Live would also have to run off-sandbox, because mainnet is geo-blocked here.
+
+**Clock skew.**
+- Skew over 1000 ms against the venue's server time, measured at the request midpoint and re-synced every cycle, trips the kill switch.
+- Closed bars are judged with `min(server time, local time)` plus a 2 s grace.
+- A host with a drifting clock will halt repeatedly rather than trade on wrong bars.
+
+**Single points of failure.**
+- One process on one host, with no supervisor or failover.
+- One exchange (Binance) and one network path.
+- One state file and one decision log on local disk. Deleting both and passing `--init-state` is an unpreventable bypass of a persisted halt, though it is printed and logged.
+- The local clock.
+- The environment variables that hold the keys.
+- The kill switch flattens through the same venue API it guards. If that API is down, the flatten fails (logged `flatten_failed`, and the system stays halted). Only the exchange-side reduce-only stops then protect open positions.
+- There is no client-side rate limiting. A 429 is counted as an API error and the loop waits the venue's `Retry-After` (at least one poll interval, at most 900 s, 60 s if absent); a 418 (IP ban) trips the kill switch, whose flatten then likely fails against the same ban, leaving the exchange-side stops as the only protection.
+
+**The runtime does not trade what research validated.** A research pass does NOT validate the runtime's sizing or stop policy. The committed run held +-1x equity (positions are always -1/0/+1; trend_breakout's vol_cap is a calm-market filter, not position scaling), rebalanced every bar, with no stops, and judged hold-out drawdown against the gate's 25% ceiling; the paper runtime keeps only the sign of the signal, sizes for 1% risk at a 3 x ATR(14) exchange-side disaster stop (roughly 0.4x equity notional on ETH 1h, an illustrative estimate), holds that quantity constant, does not re-enter after a stop-out until a fresh signal transition, and halts at a 3% daily loss or 10% drawdown. The committed run's backtest simulated none of this. A runtime-policy simulator (`backtest/runtime_policy.py`) now mirrors it, including the halt (a halted hold-out is rejected, so under that policy the 10% halt binds before the 25% ceiling), checked by a parity test against the real runtime loop on synthetic bars with the kill switch enabled and with costs. `scripts/run_research.py --policy {research,runtime}` is required and the report and deployed.json record the policy. It still cannot validate real exchange stop fills, testnet fills, how a 1h-ATR stop interacts with live slippage, or intrabar halts other than right after a stop fill; trend_breakout (lookback 336) can signal differently on the runtime's 1000-bar window than on full history. The next run is a new counted trial, for the user to decide.
+
+**Operator error when unlocking.** The live gate is human-only and checks process, not judgement. The following are all outside what the code can prevent:
+- editing `config/live.yaml` by mistake;
+- loosening risk limits before paper trading (they must then hold for the whole paper record);
+- exporting keys with withdrawal permission or without an IP allowlist;
+- hand-editing the decision log, which the gate trusts;
+- going live on a strategy that never passed validation.
+
+`docs/GOING_LIVE.md` lists the checklist, and every unlock attempt is logged.

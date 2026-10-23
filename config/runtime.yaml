@@ -1,0 +1,29 @@
+# Paper/testnet runtime settings. No API keys here: keys are read ONLY from the
+# environment variables BINANCE_TESTNET_KEY / BINANCE_TESTNET_SECRET.
+#
+# stop_atr_mult and atr_window are PROPOSALS for the user to confirm: the
+# research strategies emit no stop price, so the runtime derives a protective
+# stop = entry -/+ stop_atr_mult * ATR(atr_window) (simple mean of true range),
+# sizes the position so the loss at that stop is <= max_risk_per_trade, and
+# places it on the exchange as a reduce-only STOP_MARKET (disaster stop).
+# Strategy bar-close exits remain the normal exit.
+#
+# NOT VALIDATED BY RESEARCH: the committed research run held +-1x equity
+# (positions are -1/0/+1; vol_cap is a filter, not scaling), rebalanced every
+# bar, with no stop-outs. This runtime keeps only the signal's sign, sizes for 1% risk at
+# this 3 x ATR(14) stop (roughly 0.4x equity notional on ETH 1h, an
+# illustrative estimate) and does not re-enter after a stop-out until a fresh
+# signal transition. The committed research run simulated neither, so it does
+# NOT validate this sizing/stop policy. backtest/runtime_policy.py now
+# simulates it, including the risk.yaml kill-switch halt (scripts/
+# run_research.py --policy runtime; running it is a new counted run for the
+# user to decide).
+stop_atr_mult: 3.0            # PROPOSED, user to confirm
+atr_window: 14                # PROPOSED, user to confirm (bars)
+bars_limit: 1000              # closed-bar history fetched per cycle (max 1499)
+poll_interval_s: 30           # seconds between cycles; must be well under stale_after_s
+recv_window_ms: 5000          # Binance recvWindow for signed requests
+# Restart reconciliation for a position / open order on a symbol that no
+# deployed strategy owns. false (default): refuse to start and tell the user.
+# true: trip the kill switch (flatten everything and halt).
+flatten_unowned_on_start: false
