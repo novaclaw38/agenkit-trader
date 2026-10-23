@@ -22,11 +22,15 @@ Steps (each recorded pass / fail / skip with a short reason):
 
 A failed step stops the run, attempts a flatten and reports. The run always
 ends by verifying the account is flat. Exit code: 0 all passed and flat,
-1 a step failed (account flat), 4 flat NOT verified.
+1 a step failed (account verified flat), 130 interrupted (account verified
+flat), 4 flat NOT verified or not flat. Once smoke has placed an order, cleanup
+and the flat check run whatever ends the run (a hard kill, SIGKILL or power
+loss, cannot be handled: check the testnet account by hand).
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
@@ -63,7 +67,7 @@ from agenkit_trader.runtime.loop import (
 
 MODE = "smoke"
 CONFIRM_PHRASE = "SMOKE TESTNET"
-EXIT_OK, EXIT_FAILED, EXIT_NOT_FLAT = 0, 1, 4
+EXIT_OK, EXIT_FAILED, EXIT_NOT_FLAT, EXIT_INTERRUPTED = 0, 1, 4, 130
 STOP_DISTANCE_FRAC = 0.05  # protective stop 5% below the entry
 NOTIONAL_BUFFER = 1.05  # price-drift buffer over the exchange minimum notional
 VISIBLE_TRIES = 5
@@ -128,11 +132,14 @@ class SmokeReport:
     steps: list[StepResult] = field(default_factory=list)
     flat: bool | None = None  # None: could not be verified
     flat_note: str = ""
+    interrupted: bool = False
 
     @property
     def exit_code(self) -> int:
         if self.flat is not True:
             return EXIT_NOT_FLAT
+        if self.interrupted:
+            return EXIT_INTERRUPTED
         return EXIT_OK if all(s.status == "pass" for s in self.steps) else EXIT_FAILED
 
     def table(self) -> str:
@@ -146,8 +153,8 @@ class SmokeReport:
             lines.append(f"Account is NOT FLAT: {self.flat_note}. Check it by hand.")
         else:
             lines.append(
-                f"Account flat status UNKNOWN (could not verify): {self.flat_note}. "
-                "Check the testnet account by hand."
+                "!! Account flat status UNKNOWN: the final check could not run "
+                f"({self.flat_note}). CHECK THE TESTNET ACCOUNT BY HAND NOW."
             )
         return "\n".join(lines)
 
@@ -210,6 +217,7 @@ class _Smoke:
         )
         self.gate = RiskGate(risk, venue.symbol_rules, log)
         self.run_bar = pd.Timestamp(clock())
+        self.cleaned = False
         self.touched = False  # an order was attempted: cleanup may flatten
         self.details: dict[str, Any] = {}
         self.qty = 0.0
@@ -447,11 +455,20 @@ class _Smoke:
 
 
 def _check_testnet_only(venue: object) -> None:
+    """Fail closed: a venue without a ``base_url`` is refused too."""
     base = getattr(venue, "base_url", None)
-    if base is not None:
-        u = urlsplit(str(base))
-        if u.scheme != "https" or u.hostname != TESTNET_HOST:
-            raise SmokeRefused("venue is not the Binance futures testnet host")
+    if base is None:
+        raise SmokeRefused("venue does not state its base_url; refusing (fail closed)")
+    u = urlsplit(str(base))
+    if u.scheme != "https" or u.hostname != TESTNET_HOST:
+        raise SmokeRefused("venue is not the Binance futures testnet host")
+
+
+def _safe_log(
+    log: SmokeLog, kind: str, inputs: dict[str, Any], out: dict[str, Any], result: str
+) -> None:
+    with contextlib.suppress(Exception):  # a failing log must never stop cleanup
+        log.write(kind, inputs, out, result)
 
 
 def run_smoke(
@@ -464,33 +481,53 @@ def run_smoke(
     clock: Callable[[], datetime],
     sleep: Callable[[float], None] = time.sleep,
 ) -> SmokeReport:
+    """Run the checklist. Once smoke has touched the account, cleanup (flatten)
+    and the final flat verification ALWAYS run, whatever ended the steps
+    (a step failure, KeyboardInterrupt, SystemExit, a failing log write)."""
     _check_testnet_only(venue)
     s = _Smoke(venue, symbol, risk, file_rules, log, clock, sleep)
     report = SmokeReport()
-    log.write("smoke_run", {"symbol": symbol}, {}, "start")
-    failed = False
-    for n in range(1, 9):
-        name = STEP_NAMES[n]
-        if failed:
-            res = StepResult(n, name, "skip", "not run: an earlier step failed")
-        else:
-            try:
-                reason = getattr(s, f"step{n}")()
-                res = StepResult(n, name, "pass", reason)
-            except Exception as exc:
-                res = StepResult(n, name, "fail", _exc_text(exc))
-                failed = True
-        report.steps.append(res)
-        log.write(
-            "smoke_step",
-            {"step": n, "name": name},
-            {"reason": res.reason},
-            res.status,
+    aborted: BaseException | None = None
+    n = 0
+    try:
+        log.write("smoke_run", {"symbol": symbol}, {}, "start")
+        failed = False
+        for n in range(1, 9):
+            name = STEP_NAMES[n]
+            if failed:
+                res = StepResult(n, name, "skip", "not run: an earlier step failed")
+            else:
+                try:
+                    res = StepResult(n, name, "pass", getattr(s, f"step{n}")())
+                except Exception as exc:
+                    res = StepResult(n, name, "fail", _exc_text(exc))
+                    failed = True
+            report.steps.append(res)
+            log.write(
+                "smoke_step",
+                {"step": n, "name": name},
+                {"reason": res.reason},
+                res.status,
+            )
+            if res.status == "fail" and s.touched:
+                _cleanup(s)
+    except BaseException as exc:
+        aborted = exc
+        report.interrupted = isinstance(exc, KeyboardInterrupt | SystemExit)
+        why = (
+            "interrupted"
+            if report.interrupted
+            else f"run aborted outside a step: {_exc_text(exc)}"
         )
-        if res.status == "fail" and s.touched:
-            _cleanup(s)
+        if len(report.steps) < n:  # the step in flight never reported
+            report.steps.append(StepResult(n, STEP_NAMES[n], "fail", why))
+        for k in range(len(report.steps) + 1, 9):
+            report.steps.append(StepResult(k, STEP_NAMES[k], "skip", f"not run: {why}"))
+    if aborted is not None and s.touched:
+        _cleanup(s)
     _final_flat(s, report)
-    log.write(
+    _safe_log(
+        log,
         "smoke_run",
         {"symbol": symbol},
         {"flat": report.flat, "exit_code": report.exit_code},
@@ -500,22 +537,29 @@ def run_smoke(
 
 
 def _cleanup(s: _Smoke) -> None:
-    """A step failed after smoke placed orders: flatten (account was verified
-    flat at step 2, so everything open is ours)."""
+    """Smoke placed orders and the run is ending badly: flatten (the account
+    was verified flat at step 2, so everything open is ours). Runs once."""
+    if s.cleaned:
+        return
     try:
         s.venue.flatten_all()
-        s.log.write("smoke_cleanup", {}, {}, "flatten_ok")
-    except Exception as exc:
-        s.log.write("smoke_cleanup", {}, {"error": _exc_text(exc)}, "flatten_failed")
+        s.cleaned = True
+        _safe_log(s.log, "smoke_cleanup", {}, {}, "flatten_ok")
+    except BaseException as exc:
+        s.cleaned = True  # one attempt; the final check reports the truth
+        _safe_log(
+            s.log, "smoke_cleanup", {}, {"error": _exc_text(exc)}, "flatten_failed"
+        )
 
 
 def _final_flat(s: _Smoke, report: SmokeReport) -> None:
     try:
         ok, why = s._flat_now()
         report.flat, report.flat_note = ok, why
-    except Exception as exc:
+    except BaseException as exc:
         report.flat, report.flat_note = None, _exc_text(exc)
-    s.log.write(
+    _safe_log(
+        s.log,
         "smoke_final",
         {},
         {"flat": report.flat, "note": report.flat_note},

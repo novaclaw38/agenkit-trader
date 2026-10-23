@@ -93,7 +93,9 @@ A one-shot checklist of the order plumbing on the Binance futures testnet,
 run by you with your own testnet keys (`BINANCE_TESTNET_KEY` /
 `BINANCE_TESTNET_SECRET`). It places two tiny testnet orders with
 exchange-side stops, closes them (one through the kill switch) and verifies
-the account is flat. No strategy, no real money, its own log
+the account is flat (cleanup and the flat check also run after Ctrl-C or
+SIGTERM; a hard kill can still leave a position, so check the account). No
+strategy, testnet funds only, its own log
 (`data/smoke/smoke_log.jsonl`) that paper stats and the live unlock never read.
 It has not been run against the real testnet by the developers. Instructions:
 `docs/GOING_LIVE.md`.

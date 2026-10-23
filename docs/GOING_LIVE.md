@@ -65,8 +65,8 @@ never the typed text (only whether it matched).
 
 A one-shot checklist that proves the order plumbing works against the real
 Binance futures **testnet** before you trust a paper run. It runs on your
-machine with your own testnet keys. It uses no strategy and no signal, never
-moves real money, and was NOT run by the developers (no keys exist in the
+machine with your own testnet keys. It uses no strategy and no signal, uses
+testnet funds only (never real money), and was NOT run by the developers (no keys exist in the
 development sandbox): its first real run is yours. Anything it reports about
 the real exchange is a first observation.
 
@@ -98,7 +98,8 @@ never counts toward paper days or trades.
    The symbol must be in `config/symbol_rules.yaml`. Only the testnet host is
    reachable; there is no option to change it.
 5. Read the summary table. Exit code 0: all eight steps passed and the account
-   was verified flat. 1: a step failed (account flat). 4: the account could not
+   was verified flat. 1: a step failed (account verified flat). 130: you
+   interrupted it (account verified flat). 4: the account could not
    be verified flat; check the testnet account by hand. 2: refused to start.
 
 ### What each step means
@@ -114,8 +115,14 @@ never counts toward paper days or trades.
 | 7 | cancel the stop, close with a reduce-only order, verify flat | stop gone, position closed | cancel or reduce-only close not honoured |
 | 8 | KillSwitch flatten with a second position (and stop) | `flattened_ok`, no orders, no positions | the kill-switch path does not flatten on the real exchange: serious |
 
-A failed step stops the run, attempts a flatten and reports. Every run ends by
-checking that the account is flat.
+A failed step stops the run, attempts a flatten and reports. Once smoke has
+placed an order, the flatten and a final flat check also run after Ctrl-C,
+SIGTERM or SIGHUP (exit 130 if the account was verified flat) and after an
+unexpected error such as a failing log write. The final check reads the
+account; if it cannot run, the table says so loudly (exit 4). A hard kill
+(SIGKILL, power loss, a crashed machine) cannot be handled: it can still leave
+a position or stop on the testnet account, so check the account by hand after
+any run that did not print the "verified FLAT" line.
 
 ### What to send back
 

@@ -58,6 +58,9 @@ class FakeVenue:
     fill_fraction: float = 1.0
     order_status: dict[str, OrderStatus] = field(default_factory=dict)
 
+    # The venue states its (testnet) host; smoke refuses any venue without one.
+    base_url = "https://testnet.binancefuture.com"
+
     def _maybe_fail(self) -> None:
         if self.fail_next > 0:
             self.fail_next -= 1

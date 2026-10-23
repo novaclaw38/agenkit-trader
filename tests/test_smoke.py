@@ -260,6 +260,129 @@ def test_smoke_uses_no_strategy_or_deployed_or_paper_files() -> None:
     assert not any("strateg" in m for m in imports)
 
 
+class Trip(FakeVenue):
+    """Raises KeyboardInterrupt on the nth call of one method."""
+
+    trip_on = ""
+    trip_n = 1
+    seen = 0
+
+    def _t(self, name: str) -> None:
+        if name == self.trip_on:
+            self.seen += 1
+            if self.seen == self.trip_n:
+                raise KeyboardInterrupt
+
+    def server_time(self) -> Any:
+        self._t("server_time")
+        return super().server_time()
+
+    def place_order(self, order: Order) -> Any:
+        self._t("place_order")
+        return super().place_order(order)
+
+    def place_stop(self, order: Order) -> str:
+        self._t("place_stop")
+        return super().place_stop(order)
+
+    def cancel_stop(self, symbol: str, client_id: str) -> None:
+        self._t("cancel_stop")
+        super().cancel_stop(symbol, client_id)
+
+    def flatten_all(self) -> None:
+        self._t("flatten_all")
+        super().flatten_all()
+
+
+def trip(on: str, n: int = 1) -> Trip:
+    v = Trip(rules={"BTCUSDT": BTC}, marks={"BTCUSDT": 50_000.0})
+    v.trip_on, v.trip_n = on, n
+    return v
+
+
+@pytest.mark.parametrize(
+    "on,n",
+    [
+        ("place_order", 1),  # entry sent, outcome unknown to smoke
+        ("place_stop", 1),  # step 4
+        ("cancel_stop", 1),  # step 7
+        ("place_order", 2),  # step 7 close
+        ("place_order", 3),  # step 8 second entry
+        ("place_stop", 2),  # step 8 second stop
+        ("flatten_all", 1),  # during step 8 kill switch
+    ],
+)
+def test_interrupt_ends_flat_exit_130(tmp_path: Path, on: str, n: int) -> None:
+    v = trip(on, n)
+    r = go(tmp_path, v)
+    assert r.report.interrupted and r.report.flat is True
+    assert r.report.exit_code == 130
+    assert v.positions == {} and v.stops == []
+    assert any(s.status == "fail" and "interrupted" in s.reason for s in r.report.steps)
+    assert [s.n for s in r.report.steps] == list(range(1, 9))
+
+
+def test_interrupt_before_anything_touched_does_not_flatten(tmp_path: Path) -> None:
+    v = trip("server_time")
+    r = go(tmp_path, v)
+    assert r.report.exit_code == 130 and r.report.flat is True
+    assert v.flatten_calls == 0 and v.orders == []
+
+
+def test_interrupt_and_unreadable_account_is_exit_4(tmp_path: Path) -> None:
+    class Dead(Trip):
+        def get_open_orders(self) -> Any:
+            if self.seen:
+                raise smoke.VenueError("down")
+            return super().get_open_orders()
+
+    v = Dead(rules={"BTCUSDT": BTC}, marks={"BTCUSDT": 50_000.0})
+    v.trip_on, v.trip_n = "place_stop", 1
+    r = go(tmp_path, v)
+    assert r.report.flat is None and r.report.exit_code == 4
+    assert "UNKNOWN" in r.report.table()
+
+
+def test_log_write_failure_mid_run_still_flattens(tmp_path: Path) -> None:
+    class FlakyLog(smoke.SmokeLog):
+        def write(
+            self, kind: str, inputs: dict[str, Any], output: dict[str, Any], result: str
+        ) -> None:
+            if kind == "smoke_step" and inputs.get("step") == 5:
+                raise OSError("disk full")
+            super().write(kind, inputs, output, result)
+
+    v = make_venue()
+    rep = smoke.run_smoke(
+        v,
+        symbol="BTCUSDT",
+        risk=RiskConfig(),
+        file_rules=FILE_RULES,
+        log=FlakyLog(tmp_path / "s" / "smoke_log.jsonl"),
+        clock=lambda: T0,
+        sleep=lambda s: None,
+    )
+    assert v.flatten_calls >= 1 and v.positions == {} and v.stops == []
+    assert rep.flat is True and rep.exit_code == 1 and not rep.interrupted
+    assert [s.status for s in rep.steps[3:]] == ["pass", "pass", "skip", "skip", "skip"]
+    assert "aborted" in rep.steps[5].reason
+
+
+def test_untouched_failure_does_no_cleanup(tmp_path: Path) -> None:
+    v = make_venue(positions={"BTCUSDT": Position("BTCUSDT", 0.5, 40_000.0)})
+    r = go(tmp_path, v)
+    assert v.flatten_calls == 0 and v.positions["BTCUSDT"].qty == 0.5
+    assert r.report.exit_code == 4
+
+
+def test_venue_without_base_url_refused_fail_closed(tmp_path: Path) -> None:
+    class Anon(FakeVenue):
+        base_url = None  # type: ignore[assignment]
+
+    with pytest.raises(smoke.SmokeRefused):
+        go(tmp_path, Anon(rules={"BTCUSDT": BTC}, marks={"BTCUSDT": 50_000.0}))
+
+
 # ---------------------------------------------------------------- CLI
 
 
@@ -359,3 +482,40 @@ def test_refuses_non_testnet_venue_object(tmp_path: Path) -> None:
     with pytest.raises(smoke.SmokeRefused):
         go(tmp_path, v)
     assert v.orders == []
+
+
+def test_cli_refusal_creates_no_data_dir(
+    cli_env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(cli.KEY_ENV, raising=False)
+    assert cli.main(["smoke", "--yes"]) == cli.EXIT_REFUSED
+    assert cli.main(["smoke", "--yes", "--symbol", "x"]) == cli.EXIT_REFUSED
+    assert not cli_env["log"].parent.exists()
+
+
+def test_cli_sigterm_becomes_interrupt_and_handlers_restored(
+    cli_env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import signal
+
+    monkeypatch.setenv(cli.KEY_ENV, KEY)
+    monkeypatch.setenv(cli.SECRET_ENV, SECRET)
+    before = (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGHUP))
+
+    class Killed(FakeVenue):
+        def place_stop(self, order: Order) -> str:
+            signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)  # type: ignore[operator]
+            return super().place_stop(order)
+
+    made: list[Killed] = []
+
+    def factory(**kw: Any) -> Killed:
+        v = Killed(rules={"BTCUSDT": BTC}, marks={"BTCUSDT": 50_000.0})
+        made.append(v)
+        return v
+
+    monkeypatch.setattr(cli, "BinanceTestnetVenue", factory)
+    assert cli.main(["smoke", "--yes"]) == 130
+    assert made[0].positions == {}  # flattened before exiting
+    after = (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGHUP))
+    assert before == after

@@ -32,12 +32,15 @@ switch, 130 interrupted; smoke: 1 a step failed, 4 account flat not verified.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import re
 import runpy
+import signal
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -304,11 +307,13 @@ def _smoke_clock() -> datetime:
 
 def _smoke(a: argparse.Namespace) -> int:
     """Testnet plumbing checklist. Never touches the paper log, state or
-    deployed.json; never prints or logs the keys."""
-    log = smoke.SmokeLog(SMOKE_LOG)
+    deployed.json; never prints or logs the keys. The smoke log (and its
+    directory) is created only after the arguments and confirmation pass."""
+    log: smoke.SmokeLog | None = None
 
     def refuse(msg: str) -> int:
-        log.write("smoke_run", {}, {"reason": msg}, "refused")
+        if log is not None:
+            log.write("smoke_run", {}, {"reason": msg}, "refused")
         _err(f"smoke: refusing to run: {msg}")
         return EXIT_REFUSED
 
@@ -330,8 +335,8 @@ def _smoke(a: argparse.Namespace) -> int:
         "agenkit smoke: TESTNET plumbing checklist (no strategy, no signal).\n"
         f"Venue: https://{TESTNET_HOST} only (mainnet is unreachable from here).\n"
         f"Symbol: {a.symbol}. It will place two tiny MARKET entries with "
-        "exchange-side stops,\nclose one with a reduce-only order and one through the "
-        "kill switch, then verify the account is flat.\n"
+        "exchange-side stops,\nclose one with a reduce-only order and one through "
+        "the kill switch, then verify the account is flat.\n"
         "The testnet account must have NO open positions or orders: this "
         "run flattens the whole account on failure.\n"
         f"Log: {SMOKE_LOG} (separate from the paper log; never counted)."
@@ -345,6 +350,17 @@ def _smoke(a: argparse.Namespace) -> int:
             return refuse("no confirmation typed")
         if typed != smoke.CONFIRM_PHRASE:
             return refuse("confirmation phrase not given")
+    log = smoke.SmokeLog(SMOKE_LOG)
+
+    def on_signal(signum: int, frame: object) -> None:
+        raise KeyboardInterrupt  # run_smoke then cleans up and verifies flat
+
+    old: dict[int, Any] = {}
+    for name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            with contextlib.suppress(ValueError):  # not the main thread
+                old[sig] = signal.signal(sig, on_signal)
     try:
         venue = BinanceTestnetVenue(
             key_env=KEY_ENV, secret_env=SECRET_ENV, recv_window_ms=rt_cfg.recv_window_ms
@@ -359,11 +375,12 @@ def _smoke(a: argparse.Namespace) -> int:
         )
     except (ValueError, smoke.SmokeRefused) as exc:
         return refuse(smoke._scrub(str(exc)))
-    except KeyboardInterrupt:
-        log.write("smoke_run", {}, {}, "interrupted")
-        _err("smoke: interrupted; CHECK the testnet account for open positions")
-        return 130
+    finally:
+        for sig, handler in old.items():
+            signal.signal(sig, handler)
     print(report.table())
+    if report.interrupted:
+        _err("smoke: interrupted; see the flat check above")
     print(f"Send back: {SMOKE_LOG} (contains no keys).")
     return report.exit_code
 
