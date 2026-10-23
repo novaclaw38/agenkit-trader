@@ -208,7 +208,7 @@ def test_research_real_repo_files() -> None:
     p = readers.UiPaths.default()
     assert p.research_dir == REPO / "research"
     r = readers.read_research(p)
-    assert r["trials_total"] == 60 and len(r["candidates"]) == 6
+    assert r["trials_total"] == 123 and len(r["candidates"]) == 6
     assert r["deployed"] == [] and "nothing passed the gate" in r["deployed_message"]
     c = r["candidates"][0]
     assert c["policy"] == "research" and c["n_trials"] == 9

@@ -32,6 +32,10 @@ SYMS = [
     "AVAXUSDT",
     "LTCUSDT",
 ]
+# Dropped before any evaluation (4h archive gap 2022-02-26..28, see NOTES.md and
+# the addendum symbol-drop rule). The frozen list above stays the reference.
+DROPPED = {"SOLUSDT", "XRPUSDT", "LTCUSDT"}
+RUN_SYMS = [s for s in SYMS if s not in DROPPED]
 
 
 class Touched(Exception):
@@ -54,7 +58,7 @@ def _mod() -> dict[str, Any]:
 
 def test_round2_config_matches_the_preregistration() -> None:
     d = yaml.safe_load(CFG.read_text())
-    assert d["symbols"] == SYMS and d["interval"] == "4h"
+    assert d["symbols"] == RUN_SYMS and d["interval"] == "4h"
     assert str(d["start"]) == "2021-01-01" and str(d["end"]) == "2026-10-01"
     assert d["out"] == "research/round2/REPORT.md"
     assert d["trials"] == "research/trials.json"  # shared counter
@@ -68,37 +72,44 @@ def test_round2_config_matches_the_preregistration() -> None:
         "vol_cap": [1.5],
     }
     assert d["expect"] == {
-        "per_strategy": {"trend_breakout_r2": 30, "trend_funding_filter": 60},
-        "new_trials": 90,
-        "total_after": 150,
+        "per_strategy": {"trend_breakout_r2": 21, "trend_funding_filter": 42},
+        "new_trials": 63,
+        "total_after": 123,
     }
     rules = load_symbol_rules(ROOT / "config" / "symbol_rules.yaml")
     assert set(SYMS) <= set(rules)
 
 
-def test_plan_prints_and_verifies_90(
+def test_plan_prints_and_verifies_63(
     capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     mod = _mod()
     mod["_globals"]["TrialCounter"] = _boom  # --plan must not even instantiate it
     mod["main"](["--config", str(CFG), "--policy", "runtime", "--plan"])
     out = capsys.readouterr().out
-    for s in SYMS:
+    for s in RUN_SYMS:
         assert s in out
+    for s in DROPPED:
+        assert s not in out
     assert "trend_breakout_r2" in out and "trend_funding_filter" in out
-    assert "3 grid points x 10 symbols = 30 trials" in out
-    assert "6 grid points x 10 symbols = 60 trials" in out
-    assert "trials that WOULD be added: 90" in out
-    assert "expected counter total afterwards: 150" in out
+    assert "3 grid points x 7 symbols = 21 trials" in out
+    assert "6 grid points x 7 symbols = 42 trials" in out
+    assert "trials that WOULD be added: 63" in out
+    assert "expected counter total afterwards: 123" in out
     assert "VERIFIED" in out and "interval: 4h" in out
 
 
 def test_plan_does_not_touch_the_committed_trial_file() -> None:
     p = ROOT / "research" / "trials.json"
-    before = p.read_bytes()
+    r2 = ROOT / "research" / "round2"
+
+    def snap() -> list[tuple[str, bytes]]:
+        return sorted((str(f), f.read_bytes()) for f in r2.rglob("*") if f.is_file())
+
+    before, files = p.read_bytes(), snap()
     _mod()["main"](["--config", str(CFG), "--policy", "runtime", "--plan"])
     assert p.read_bytes() == before
-    assert not (ROOT / "research" / "round2").exists()
+    assert snap() == files  # --plan writes nothing
 
 
 def _config_with(tmp_path: Path, edit: Any) -> Path:
@@ -127,14 +138,14 @@ def test_plan_fails_when_counts_differ(
         _mod()["main"](["--config", str(p), "--policy", "runtime", "--plan"])
     assert e.value.code == 1
     out = capsys.readouterr().out
-    assert "MISMATCH" in out and "90" in out
+    assert "MISMATCH" in out and "63" in out
 
 
 def test_real_run_refused_before_data_or_counting_on_total_mismatch(
     tmp_path: Path,
 ) -> None:
     trials = tmp_path / "trials.json"
-    trials.write_text(json.dumps({"total": 61}) + "\n")  # 61 + 90 != 150
+    trials.write_text(json.dumps({"total": 61}) + "\n")  # 61 + 63 != 123
     with pytest.raises(SystemExit, match="plan check failed"):
         _mod()["main"](
             ["--config", str(_cfg_trials(tmp_path, trials)), "--policy", "runtime"]
@@ -144,7 +155,7 @@ def test_real_run_refused_before_data_or_counting_on_total_mismatch(
 
 def test_real_run_with_right_total_proceeds_to_data_loading(tmp_path: Path) -> None:
     trials = tmp_path / "trials.json"
-    trials.write_text(json.dumps({"total": 60}) + "\n")
+    trials.write_text(json.dumps({"total": 60}) + "\n")  # 60 + 63 == 123
     with pytest.raises(Touched):  # got past the plan check: first data load
         _mod()["main"](
             ["--config", str(_cfg_trials(tmp_path, trials)), "--policy", "runtime"]
